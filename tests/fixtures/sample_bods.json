@@ -1,0 +1,135 @@
+[
+  {
+    "statementId": "test-entity-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-entity-alpha",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {"type": "registeredEntity"},
+      "isComponent": false,
+      "name": "Alpha Corp",
+      "jurisdiction": {"name": "United Kingdom", "code": "GB"},
+      "identifiers": [{"id": "00112233", "scheme": "GB-COH", "schemeName": "Companies House"}],
+      "foundingDate": "2020-01-01",
+      "addresses": [{"type": "registered", "address": "1 Test St, London", "postCode": "SW1A 1AA", "country": {"name": "United Kingdom", "code": "GB"}}]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-entity-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-entity-beta",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {"type": "registeredEntity"},
+      "isComponent": false,
+      "name": "Beta Holdings Ltd",
+      "jurisdiction": {"name": "British Virgin Islands", "code": "VG"},
+      "identifiers": [{"id": "BVI-001", "schemeName": "BVI Registry"}],
+      "foundingDate": "2018-06-15"
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-entity-003",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-entity-trust",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {"type": "arrangement", "subtype": "trust"},
+      "isComponent": false,
+      "name": "The Alpha Family Trust"
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-person-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-person-alice",
+    "recordType": "person",
+    "recordStatus": "new",
+    "recordDetails": {
+      "personType": "knownPerson",
+      "isComponent": false,
+      "names": [{"fullName": "Alice Johnson", "givenName": "Alice", "familyName": "Johnson", "type": "legal"}],
+      "birthDate": "1980-03",
+      "nationalities": [{"name": "United Kingdom", "code": "GB"}],
+      "addresses": [{"type": "residence", "address": "10 Oak Lane, Bristol", "country": {"name": "United Kingdom", "code": "GB"}}]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-person-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-person-bob",
+    "recordType": "person",
+    "recordStatus": "new",
+    "recordDetails": {
+      "personType": "knownPerson",
+      "isComponent": false,
+      "names": [{"fullName": "Bob Chen", "givenName": "Bob", "familyName": "Chen", "type": "legal"}],
+      "birthDate": "1972-08",
+      "nationalities": [{"name": "Singapore", "code": "SG"}]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-rel-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-rel-alice-alpha",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-alpha",
+      "interestedParty": "rec-person-alice",
+      "interests": [
+        {"type": "shareholding", "directOrIndirect": "direct", "beneficialOwnershipOrControl": true, "share": {"minimum": 50, "maximum": 75}, "startDate": "2020-01-01"}
+      ]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-rel-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-rel-beta-alpha",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-alpha",
+      "interestedParty": "rec-entity-beta",
+      "interests": [
+        {"type": "shareholding", "directOrIndirect": "direct", "beneficialOwnershipOrControl": false, "share": {"minimum": 25, "maximum": 50}, "startDate": "2020-03-01"}
+      ]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  },
+  {
+    "statementId": "test-rel-003",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-alpha",
+    "recordId": "rec-rel-bob-beta",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-beta",
+      "interestedParty": "rec-person-bob",
+      "interests": [
+        {"type": "shareholding", "directOrIndirect": "direct", "beneficialOwnershipOrControl": true, "share": {"exact": 100}, "startDate": "2018-06-15"}
+      ]
+    },
+    "publicationDetails": {"publicationDate": "2024-01-15", "bodsVersion": "0.4", "publisher": {"name": "Test Publisher"}}
+  }
+]

@@ -1,0 +1,380 @@
+[
+  {
+    "statementId": "stmt-entity-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-entity-acme",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {
+        "type": "registeredEntity"
+      },
+      "isComponent": false,
+      "name": "Acme Holdings Ltd",
+      "jurisdiction": {
+        "name": "United Kingdom",
+        "code": "GB"
+      },
+      "identifiers": [
+        {
+          "id": "12345678",
+          "scheme": "GB-COH",
+          "schemeName": "Companies House"
+        }
+      ],
+      "foundingDate": "2010-03-15",
+      "addresses": [
+        {
+          "type": "registered",
+          "address": "123 Business Park, London",
+          "postCode": "EC1A 1BB",
+          "country": {
+            "name": "United Kingdom",
+            "code": "GB"
+          }
+        }
+      ],
+      "uri": "https://find-and-update.company-information.service.gov.uk/company/12345678"
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-entity-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-entity-subsidiary",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {
+        "type": "registeredEntity"
+      },
+      "isComponent": false,
+      "name": "Acme Manufacturing Ltd",
+      "jurisdiction": {
+        "name": "United Kingdom",
+        "code": "GB"
+      },
+      "identifiers": [
+        {
+          "id": "87654321",
+          "scheme": "GB-COH",
+          "schemeName": "Companies House"
+        }
+      ],
+      "foundingDate": "2015-06-01"
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-entity-003",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-entity-offshore",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {
+        "type": "registeredEntity"
+      },
+      "isComponent": true,
+      "name": "Offshore Investments BVI Ltd",
+      "jurisdiction": {
+        "name": "British Virgin Islands",
+        "code": "VG"
+      },
+      "identifiers": [
+        {
+          "id": "BVI-99001",
+          "schemeName": "BVI Financial Services Commission"
+        }
+      ],
+      "foundingDate": "2008-11-20"
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-entity-004",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-entity-trust",
+    "recordType": "entity",
+    "recordStatus": "new",
+    "recordDetails": {
+      "entityType": {
+        "type": "arrangement",
+        "subtype": "trust"
+      },
+      "isComponent": false,
+      "name": "The Acme Family Trust"
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-person-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-person-jane",
+    "recordType": "person",
+    "recordStatus": "new",
+    "recordDetails": {
+      "personType": "knownPerson",
+      "isComponent": false,
+      "names": [
+        {
+          "fullName": "Jane Smith",
+          "givenName": "Jane",
+          "familyName": "Smith",
+          "type": "legal"
+        }
+      ],
+      "birthDate": "1975-04",
+      "nationalities": [
+        {
+          "name": "United Kingdom",
+          "code": "GB"
+        }
+      ],
+      "addresses": [
+        {
+          "type": "residence",
+          "address": "45 Maple Avenue, Manchester",
+          "country": {
+            "name": "United Kingdom",
+            "code": "GB"
+          }
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-person-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-person-john",
+    "recordType": "person",
+    "recordStatus": "new",
+    "recordDetails": {
+      "personType": "knownPerson",
+      "isComponent": false,
+      "names": [
+        {
+          "fullName": "John Doe",
+          "givenName": "John",
+          "familyName": "Doe",
+          "type": "legal"
+        }
+      ],
+      "birthDate": "1968-11",
+      "nationalities": [
+        {
+          "name": "Germany",
+          "code": "DE"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-rel-001",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-rel-jane-acme",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-acme",
+      "interestedParty": "rec-person-jane",
+      "interests": [
+        {
+          "type": "shareholding",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": true,
+          "share": {
+            "minimum": 50,
+            "maximum": 75
+          },
+          "startDate": "2010-03-15"
+        },
+        {
+          "type": "votingRights",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": true,
+          "share": {
+            "minimum": 50,
+            "maximum": 75
+          },
+          "startDate": "2010-03-15"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-rel-002",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-rel-acme-subsidiary",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-subsidiary",
+      "interestedParty": "rec-entity-acme",
+      "interests": [
+        {
+          "type": "shareholding",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": false,
+          "share": {
+            "exact": 100
+          },
+          "startDate": "2015-06-01"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-rel-003",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-rel-offshore-acme",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-acme",
+      "interestedParty": "rec-entity-offshore",
+      "interests": [
+        {
+          "type": "shareholding",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": false,
+          "share": {
+            "minimum": 25,
+            "maximum": 50
+          },
+          "startDate": "2012-01-10"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-rel-004",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-rel-john-offshore",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-offshore",
+      "interestedParty": "rec-person-john",
+      "interests": [
+        {
+          "type": "shareholding",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": true,
+          "share": {
+            "exact": 100
+          },
+          "startDate": "2008-11-20"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  },
+  {
+    "statementId": "stmt-rel-005",
+    "statementDate": "2024-01-15",
+    "declarationSubject": "rec-entity-acme",
+    "recordId": "rec-rel-jane-trust-settlor",
+    "recordType": "relationship",
+    "recordStatus": "new",
+    "recordDetails": {
+      "isComponent": false,
+      "subject": "rec-entity-trust",
+      "interestedParty": "rec-person-jane",
+      "interests": [
+        {
+          "type": "settlor",
+          "directOrIndirect": "direct",
+          "beneficialOwnershipOrControl": true,
+          "startDate": "2018-05-01"
+        }
+      ]
+    },
+    "publicationDetails": {
+      "publicationDate": "2024-01-15",
+      "bodsVersion": "0.4",
+      "publisher": {
+        "name": "BODS Neo4j Example"
+      }
+    }
+  }
+]
