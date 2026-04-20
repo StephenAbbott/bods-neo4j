@@ -36,8 +36,8 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "bods-fixtures @ git+https://github.com/StephenAbbott/bods-fixtures.git@v0.1.0",
-    "pytest-bods-fixtures @ git+https://github.com/StephenAbbott/pytest-bods-fixtures.git@v0.1.0",
+    "bods-v04-fixtures>=0.1.1,<0.2",
+    "pytest-bods-v04-fixtures>=0.1.1,<0.2",
 ]
 
 [project.scripts]
