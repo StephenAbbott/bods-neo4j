@@ -209,6 +209,12 @@ Tests cover:
 - Round-trip fidelity (BODS → Neo4j → BODS)
 - BODS schema utilities
 
+### Conformance against the shared BODS v0.4 fixture pack
+
+`tests/test_bods_fixtures_conformance.py` runs the mapper against every case in the canonical [**bods-v04-fixtures**](https://pypi.org/project/bods-v04-fixtures/) pack via the [**pytest-bods-v04-fixtures**](https://pypi.org/project/pytest-bods-v04-fixtures/) plugin. Tests are parametrized by fixture name so a failure like `[edge-cases/10-circular-ownership]` points straight at the offending case.
+
+Graph-specific conformance checks include: every statement maps to a node or relationship (no silent `None` returns from shape divergence); circular ownership emits two distinct mirrored HAS_INTEREST edges; and declared-unknown UBOs (inline `unspecifiedReason`) don't crash the mapper and still leave the known subject entity as a usable node.
+
 ## Project Structure
 
 ```
