@@ -2,6 +2,8 @@
 
 Bidirectional converter between the [Beneficial Ownership Data Standard (BODS) v0.4](https://standard.openownership.org/en/0.4.0/) and [Neo4j](https://neo4j.com/) graph database, with built-in graph analysis queries for UBO detection, corporate group mapping, and circular ownership detection.
 
+Part of the [BODS Interoperability Toolkit](https://github.com/StephenAbbott/bods-interoperability-toolkit).
+
 ## Why?
 
 **BODS** provides a universal, standardised format for beneficial ownership data — enabling interoperability across countries, registers, and data sources. **Neo4j** provides powerful graph traversal and analysis capabilities that are essential for understanding complex ownership structures.
