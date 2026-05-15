@@ -86,14 +86,24 @@ def create_constraints(driver, database: str = "neo4j"):
             "FOR (p:Person) REQUIRE p.recordId IS UNIQUE",
         ),
         (
-            "constraint_entity_statement_id",
-            "CREATE CONSTRAINT constraint_entity_statement_id IF NOT EXISTS "
-            "FOR (e:Entity) REQUIRE e.statementId IS UNIQUE",
+            "constraint_identifier_uid",
+            "CREATE CONSTRAINT constraint_identifier_uid IF NOT EXISTS "
+            "FOR (i:Identifier) REQUIRE i.uid IS UNIQUE",
         ),
         (
-            "constraint_person_statement_id",
-            "CREATE CONSTRAINT constraint_person_statement_id IF NOT EXISTS "
-            "FOR (p:Person) REQUIRE p.statementId IS UNIQUE",
+            "constraint_address_uid",
+            "CREATE CONSTRAINT constraint_address_uid IF NOT EXISTS "
+            "FOR (a:Address) REQUIRE a.uid IS UNIQUE",
+        ),
+        (
+            "constraint_country_code",
+            "CREATE CONSTRAINT constraint_country_code IF NOT EXISTS "
+            "FOR (c:Country) REQUIRE c.code IS UNIQUE",
+        ),
+        (
+            "constraint_unspecified_party_uid",
+            "CREATE CONSTRAINT constraint_unspecified_party_uid IF NOT EXISTS "
+            "FOR (u:UnspecifiedParty) REQUIRE u.uid IS UNIQUE",
         ),
     ]
 
@@ -117,13 +127,46 @@ def create_indexes(driver, database: str = "neo4j"):
             "CREATE INDEX idx_person_name IF NOT EXISTS FOR (p:Person) ON (p.name)",
         ),
         (
-            "idx_entity_jurisdiction",
-            "CREATE INDEX idx_entity_jurisdiction IF NOT EXISTS "
-            "FOR (e:Entity) ON (e.jurisdictionCode)",
-        ),
-        (
             "idx_entity_type",
             "CREATE INDEX idx_entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entityType)",
+        ),
+        (
+            "idx_entity_statement_id",
+            "CREATE INDEX idx_entity_statement_id IF NOT EXISTS "
+            "FOR (e:Entity) ON (e.statementId)",
+        ),
+        (
+            "idx_person_statement_id",
+            "CREATE INDEX idx_person_statement_id IF NOT EXISTS "
+            "FOR (p:Person) ON (p.statementId)",
+        ),
+        # Relationship-property indexes on statementId speed up the
+        # statement-by-statementId grouping the reverse mapper does (one
+        # MATCH per BODS relationship statement).
+        (
+            "idx_owns_statement_id",
+            "CREATE INDEX idx_owns_statement_id IF NOT EXISTS "
+            "FOR ()-[r:OWNS]-() ON (r.statementId)",
+        ),
+        (
+            "idx_controls_statement_id",
+            "CREATE INDEX idx_controls_statement_id IF NOT EXISTS "
+            "FOR ()-[r:CONTROLS]-() ON (r.statementId)",
+        ),
+        (
+            "idx_manages_statement_id",
+            "CREATE INDEX idx_manages_statement_id IF NOT EXISTS "
+            "FOR ()-[r:MANAGES]-() ON (r.statementId)",
+        ),
+        (
+            "idx_is_party_to_statement_id",
+            "CREATE INDEX idx_is_party_to_statement_id IF NOT EXISTS "
+            "FOR ()-[r:IS_PARTY_TO]-() ON (r.statementId)",
+        ),
+        (
+            "idx_has_other_interest_statement_id",
+            "CREATE INDEX idx_has_other_interest_statement_id IF NOT EXISTS "
+            "FOR ()-[r:HAS_OTHER_INTEREST]-() ON (r.statementId)",
         ),
     ]
 
@@ -152,12 +195,16 @@ def clear_database(driver, database: str = "neo4j"):
     """Remove all nodes and relationships from the database.
 
     WARNING: This is destructive. Use with caution.
+
+    `CALL { } IN TRANSACTIONS` requires an auto-commit (implicit) transaction,
+    so we use `session.run` rather than `driver.execute_query` (which wraps
+    every query in a managed transaction).
     """
     logger.warning("Clearing all data from database '%s'", database)
-    driver.execute_query(
-        "CALL { MATCH (n) DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS",
-        database_=database,
-    )
+    with driver.session(database=database) as session:
+        session.run(
+            "CALL { MATCH (n) DETACH DELETE n } IN TRANSACTIONS OF 10000 ROWS"
+        ).consume()
     logger.info("Database cleared")
 
 

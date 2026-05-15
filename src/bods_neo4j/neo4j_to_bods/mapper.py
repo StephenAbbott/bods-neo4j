@@ -1,12 +1,14 @@
-"""Map Neo4j nodes and relationships back to BODS v0.4 statements.
+"""Map graph-native Neo4j envelopes back to BODS v0.4 statements.
 
-This module reconstructs valid BODS v0.4 statements from Neo4j graph data.
+The extractor at ``neo4j_to_bods.extractor`` yields one envelope per BODS
+statement, already aggregated with its child nodes (identifiers, addresses,
+jurisdiction, interests). This module reconstructs each envelope into a
+valid BODS v0.4 statement dict.
 
-Two modes of operation:
-1. Round-trip mode: When nodes contain *_json properties (from a prior BODS import),
-   these are deserialised to reconstruct the original BODS statement faithfully.
-2. Native mode: When nodes come from a non-BODS graph (e.g. the Neo4j Companies House
-   demo), properties are mapped to BODS fields using best-effort heuristics.
+The extracted graph already carries all BODS-meaningful fields as scalar /
+list properties on the parent node — *except* any forward-compat or
+publisher-specific fields, which are preserved verbatim in ``extrasJson``
+and merged back in at this layer.
 """
 
 import json
@@ -19,421 +21,646 @@ from ..config import PublisherConfig
 
 logger = logging.getLogger(__name__)
 
-# UUID v5 namespace for deterministic statement ID generation
+# UUID v5 namespace for deterministic statement ID generation when an envelope
+# lacks a statementId (i.e. native-graph imports that never went through the
+# forward BODS mapper).
 BODS_NEO4J_NAMESPACE = uuid.UUID("e8f9a0b1-c2d3-4e5f-a6b7-c8d9e0f1a2b3")
 
 
-def map_entity_node(
-    node: dict,
-    publisher_config: PublisherConfig = None,
-) -> dict:
-    """Map a Neo4j Entity node to a BODS entity statement.
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    Args:
-        node: Dictionary of node properties (from extractor)
-        publisher_config: BODS publisher metadata
 
-    Returns:
-        BODS v0.4 entity statement dictionary
+def map_entity_node(envelope: dict, publisher_config: PublisherConfig = None) -> dict:
+    """Reconstruct a BODS entity statement from an envelope.
+
+    ``envelope`` is the dict yielded by ``extract_entity_statements``:
+        {"node": {...}, "labels": [...], "jurisdiction": {...}|None,
+         "identifiers": [...], "addresses": [...]}.
     """
     if publisher_config is None:
         publisher_config = PublisherConfig()
 
-    is_round_trip = "statementId" in node and "recordId" in node
+    node = envelope.get("node", {}) or {}
+    is_round_trip = bool(node.get("statementId"))
+    extras = _parse_extras(node)
 
-    # Build record details
-    record_details = {}
+    record_details = dict(extras.get("recordDetails", {})) if extras else {}
 
     # Entity type
-    entity_type = node.get("entityType", "registeredEntity")
-    entity_subtype = node.get("entitySubtype", "")
-    entity_type_obj = {"type": entity_type}
-    if entity_subtype:
-        entity_type_obj["subtype"] = entity_subtype
+    entity_type_obj = {"type": node.get("entityType", "registeredEntity") or "registeredEntity"}
+    if node.get("entitySubtype"):
+        entity_type_obj["subtype"] = node["entitySubtype"]
     if node.get("entityTypeDetails"):
         entity_type_obj["details"] = node["entityTypeDetails"]
     record_details["entityType"] = entity_type_obj
 
-    # isComponent
-    record_details["isComponent"] = node.get("isComponent", False)
+    record_details["isComponent"] = bool(node.get("isComponent", False))
 
-    # Name
-    name = node.get("name", "")
-    if name:
-        record_details["name"] = name
+    if node.get("name"):
+        record_details["name"] = node["name"]
+    # Preserve `alternateNames: []` when the source had the key present.
+    if "alternateNames" in node:
+        record_details["alternateNames"] = list(node["alternateNames"])
 
-    # Alternate names (from JSON or not present)
-    alt_names = _parse_json_prop(node, "alternateNames_json")
-    if alt_names:
-        record_details["alternateNames"] = alt_names
-
-    # Jurisdiction
-    jurisdiction = {}
+    # Prefer the statement-local inline `jurisdictionName / jurisdictionCode`
+    # on the Entity itself; fall back to the shared :Country node when the
+    # entity didn't carry inline scalars (graphs imported from non-BODS
+    # sources).
+    jurisdiction = envelope.get("jurisdiction") or {}
+    out_jur: dict = {}
     if node.get("jurisdictionCode"):
-        jurisdiction["code"] = node["jurisdictionCode"]
+        out_jur["code"] = node["jurisdictionCode"]
+    elif jurisdiction.get("code"):
+        out_jur["code"] = jurisdiction["code"]
     if node.get("jurisdictionName"):
-        jurisdiction["name"] = node["jurisdictionName"]
-    if jurisdiction:
-        record_details["jurisdiction"] = jurisdiction
+        out_jur["name"] = node["jurisdictionName"]
+    elif jurisdiction.get("name"):
+        out_jur["name"] = jurisdiction["name"]
+    if out_jur:
+        record_details["jurisdiction"] = out_jur
 
-    # Identifiers (prefer round-trip JSON, fall back to primary)
-    identifiers = _parse_json_prop(node, "identifiers_json")
+    identifiers = _rebuild_identifiers(envelope.get("identifiers"))
     if identifiers:
         record_details["identifiers"] = identifiers
-    elif node.get("primaryIdentifierId"):
-        identifier = {"id": node["primaryIdentifierId"]}
-        if node.get("primaryIdentifierScheme"):
-            identifier["scheme"] = node["primaryIdentifierScheme"]
-        record_details["identifiers"] = [identifier]
 
-    # Addresses
-    addresses = _parse_json_prop(node, "addresses_json")
+    addresses = _rebuild_addresses(envelope.get("addresses"))
     if addresses:
         record_details["addresses"] = addresses
 
-    # Dates
     if node.get("foundingDate"):
         record_details["foundingDate"] = node["foundingDate"]
     if node.get("dissolutionDate"):
         record_details["dissolutionDate"] = node["dissolutionDate"]
-
-    # URI
     if node.get("uri"):
         record_details["uri"] = node["uri"]
 
-    # Public listing
-    public_listing = _parse_json_prop(node, "publicListing_json")
+    public_listing = _rebuild_public_listing(node)
     if public_listing:
         record_details["publicListing"] = public_listing
-
-    # Formed by statute
-    formed_by = _parse_json_prop(node, "formedByStatute_json")
+    formed_by = _rebuild_formed_by_statute(node)
     if formed_by:
         record_details["formedByStatute"] = formed_by
 
-    # Build the statement
-    statement = {
-        "statementId": node.get("statementId", _generate_statement_id(node, "entity")),
-        "recordId": node.get("recordId", _generate_record_id(node, "entity")),
-        "recordType": "entity",
-        "recordDetails": record_details,
-    }
+    statement = _build_statement_envelope(node, "entity", extras, publisher_config, is_round_trip)
+    statement["recordDetails"] = record_details
 
-    # Optional fields
-    if node.get("statementDate"):
-        statement["statementDate"] = node["statementDate"]
-    if node.get("recordStatus"):
-        statement["recordStatus"] = node["recordStatus"]
-    if node.get("declarationSubject"):
-        statement["declarationSubject"] = node["declarationSubject"]
-
-    # Source
-    source = _parse_json_prop(node, "source_json")
-    if source:
-        statement["source"] = source
-    elif not is_round_trip:
-        statement["source"] = _build_source(publisher_config)
-
-    # Annotations
-    annotations = _parse_json_prop(node, "annotations_json")
-    if annotations:
-        statement["annotations"] = annotations
-
-    # Publication details
-    statement["publicationDetails"] = _build_publication_details(node, publisher_config)
+    replaces = node.get("replacesStatements") or []
+    if replaces:
+        statement["replacesStatements"] = list(replaces)
 
     return statement
 
 
-def map_person_node(
-    node: dict,
-    publisher_config: PublisherConfig = None,
-) -> dict:
-    """Map a Neo4j Person node to a BODS person statement.
-
-    Args:
-        node: Dictionary of node properties (from extractor)
-        publisher_config: BODS publisher metadata
-
-    Returns:
-        BODS v0.4 person statement dictionary
-    """
+def map_person_node(envelope: dict, publisher_config: PublisherConfig = None) -> dict:
     if publisher_config is None:
         publisher_config = PublisherConfig()
 
-    is_round_trip = "statementId" in node and "recordId" in node
+    node = envelope.get("node", {}) or {}
+    is_round_trip = bool(node.get("statementId"))
+    extras = _parse_extras(node)
 
-    # Build record details
-    record_details = {}
+    record_details = dict(extras.get("recordDetails", {})) if extras else {}
 
-    # Person type
-    record_details["personType"] = node.get("personType", "knownPerson")
-    record_details["isComponent"] = node.get("isComponent", False)
+    record_details["personType"] = node.get("personType", "knownPerson") or "knownPerson"
+    record_details["isComponent"] = bool(node.get("isComponent", False))
 
-    # Names (prefer round-trip JSON, fall back to node name)
-    names = _parse_json_prop(node, "names_json")
+    names = _rebuild_names(node)
     if names:
         record_details["names"] = names
-    elif node.get("name"):
-        name_obj = {"fullName": node["name"]}
-        if node.get("familyName"):
-            name_obj["familyName"] = node["familyName"]
-        if node.get("givenName"):
-            name_obj["givenName"] = node["givenName"]
-        record_details["names"] = [name_obj]
 
-    # Nationalities
-    nationalities = _parse_json_prop(node, "nationalities_json")
-    if nationalities:
-        record_details["nationalities"] = nationalities
-    elif node.get("nationalityCode"):
-        record_details["nationalities"] = [{"code": node["nationalityCode"]}]
-
-    # Identifiers
-    identifiers = _parse_json_prop(node, "identifiers_json")
-    if identifiers:
-        record_details["identifiers"] = identifiers
-
-    # Addresses
-    addresses = _parse_json_prop(node, "addresses_json")
-    if addresses:
-        record_details["addresses"] = addresses
-
-    # Dates
     if node.get("birthDate"):
         record_details["birthDate"] = node["birthDate"]
     if node.get("deathDate"):
         record_details["deathDate"] = node["deathDate"]
 
-    # Political exposure
-    pep = _parse_json_prop(node, "politicalExposure_json")
+    nationalities = _rebuild_country_list(
+        node.get("nationalityCodes"), node.get("nationalityNames"),
+    )
+    if nationalities:
+        record_details["nationalities"] = nationalities
+
+    tax_residencies = _rebuild_country_list(
+        node.get("taxResidencyCodes"), node.get("taxResidencyNames"),
+    )
+    if tax_residencies:
+        record_details["taxResidencies"] = tax_residencies
+
+    identifiers = _rebuild_identifiers(envelope.get("identifiers"))
+    if identifiers:
+        record_details["identifiers"] = identifiers
+
+    addresses = _rebuild_addresses(envelope.get("addresses"))
+    if addresses:
+        record_details["addresses"] = addresses
+
+    pob = envelope.get("place_of_birth")
+    if pob:
+        addr = (pob.get("addr") or {}).copy()
+        country = pob.get("country") or {}
+        pob_out = {}
+        if addr.get("address"):
+            pob_out["address"] = addr["address"]
+        if addr.get("postCode"):
+            pob_out["postCode"] = addr["postCode"]
+        if country:
+            pob_country = {}
+            if country.get("code"):
+                pob_country["code"] = country["code"]
+            if country.get("name"):
+                pob_country["name"] = country["name"]
+            if pob_country:
+                pob_out["country"] = pob_country
+        pob_out["type"] = "placeOfBirth"
+        if pob_out:
+            record_details["placeOfBirth"] = pob_out
+
+    pep = _rebuild_political_exposure(node)
     if pep:
         record_details["politicalExposure"] = pep
-    elif node.get("pepStatus"):
-        record_details["politicalExposure"] = {"status": node["pepStatus"]}
 
-    # Tax residencies
-    tax_res = _parse_json_prop(node, "taxResidencies_json")
-    if tax_res:
-        record_details["taxResidencies"] = tax_res
-
-    # Place of birth
-    pob = _parse_json_prop(node, "placeOfBirth_json")
-    if pob:
-        record_details["placeOfBirth"] = pob
-
-    # Unspecified person details
     if node.get("unspecifiedReason"):
         unspecified = {"reason": node["unspecifiedReason"]}
         if node.get("unspecifiedDescription"):
             unspecified["description"] = node["unspecifiedDescription"]
         record_details["unspecifiedPersonDetails"] = unspecified
 
-    # Build the statement
-    statement = {
-        "statementId": node.get("statementId", _generate_statement_id(node, "person")),
-        "recordId": node.get("recordId", _generate_record_id(node, "person")),
-        "recordType": "person",
-        "recordDetails": record_details,
-    }
+    statement = _build_statement_envelope(node, "person", extras, publisher_config, is_round_trip)
+    statement["recordDetails"] = record_details
 
-    # Optional fields
-    if node.get("statementDate"):
-        statement["statementDate"] = node["statementDate"]
-    if node.get("recordStatus"):
-        statement["recordStatus"] = node["recordStatus"]
-    if node.get("declarationSubject"):
-        statement["declarationSubject"] = node["declarationSubject"]
-
-    # Source
-    source = _parse_json_prop(node, "source_json")
-    if source:
-        statement["source"] = source
-    elif not is_round_trip:
-        statement["source"] = _build_source(publisher_config)
-
-    # Annotations
-    annotations = _parse_json_prop(node, "annotations_json")
-    if annotations:
-        statement["annotations"] = annotations
-
-    # Publication details
-    statement["publicationDetails"] = _build_publication_details(node, publisher_config)
+    replaces = node.get("replacesStatements") or []
+    if replaces:
+        statement["replacesStatements"] = list(replaces)
 
     return statement
 
 
-def map_relationship(
-    rel: dict,
-    publisher_config: PublisherConfig = None,
-) -> dict:
-    """Map a Neo4j HAS_INTEREST relationship to a BODS relationship statement.
+def map_relationship(envelope: dict, publisher_config: PublisherConfig = None) -> dict:
+    """Reconstruct a BODS relationship statement from a group of typed edges.
 
-    Args:
-        rel: Dictionary of relationship properties (from extractor), including
-             _sourceRecordId, _targetRecordId, _sourceLabels, _targetLabels
-        publisher_config: BODS publisher metadata
-
-    Returns:
-        BODS v0.4 relationship statement dictionary
+    The envelope groups all sibling typed edges (OWNS / CONTROLS / …) that
+    share a `statementId`. Statement-level metadata (publication, source,
+    annotations, extras) lives duplicated on every edge — we read it from
+    the first (interestIndex=0) edge to rebuild the BODS statement.
     """
     if publisher_config is None:
         publisher_config = PublisherConfig()
 
-    is_round_trip = "statementId" in rel and "recordId" in rel
+    edges = envelope.get("edges") or []
+    if not edges:
+        logger.warning("Skipping relationship envelope with no edges: %s",
+                       envelope.get("statement_id"))
+        return {}
 
-    # Build record details
-    record_details = {}
+    first = edges[0]
+    extras = _parse_extras(first)
 
-    record_details["isComponent"] = rel.get("isComponent", False)
+    record_details = dict(extras.get("recordDetails", {})) if extras else {}
+    record_details["isComponent"] = bool(first.get("isComponent", False))
 
-    # Subject (target node = entity being owned/controlled)
-    target_record_id = rel.get("_targetRecordId", "")
-    if target_record_id:
-        record_details["subject"] = target_record_id
+    # Subject / interested party — string recordIds when the endpoint is
+    # :Entity / :Person; reconstruct the inline unspecified object when
+    # the endpoint is a :UnspecifiedParty sentinel; or explicit null when
+    # the sentinel carries `partyValue: "null"`.
+    if envelope.get("subject_record_id"):
+        record_details["subject"] = envelope["subject_record_id"]
+    elif envelope.get("subject_unspecified"):
+        record_details["subject"] = _rebuild_unspecified(envelope["subject_unspecified"])
 
-    # Interested party (source node = owner/controller)
-    source_record_id = rel.get("_sourceRecordId", "")
-    if source_record_id:
-        record_details["interestedParty"] = source_record_id
+    if envelope.get("interested_party_record_id"):
+        record_details["interestedParty"] = envelope["interested_party_record_id"]
+    elif envelope.get("interested_party_unspecified"):
+        record_details["interestedParty"] = _rebuild_unspecified(
+            envelope["interested_party_unspecified"]
+        )
 
-    # Interests (prefer round-trip JSON, fall back to individual properties)
-    interests = _parse_json_prop(rel, "interests_json")
-    if interests:
-        record_details["interests"] = interests
-    else:
-        # Reconstruct from flat properties
-        interest = _reconstruct_interest(rel)
-        if interest:
-            record_details["interests"] = [interest]
+    # Interests — synthetic edges (emitted when the source had no
+    # interests[]) are filtered out, and the `interests` key is omitted
+    # entirely when none remain so the round-trip preserves the original
+    # shape.
+    real_edges = [e for e in edges if not e.get("synthetic")]
+    if real_edges:
+        record_details["interests"] = [_rebuild_interest(e) for e in real_edges]
 
-    # Component records
-    component_records = _parse_json_prop(rel, "componentRecords_json")
-    if component_records:
-        record_details["componentRecords"] = component_records
+    if first.get("componentRecordsJson"):
+        try:
+            record_details["componentRecords"] = json.loads(first["componentRecordsJson"])
+        except (TypeError, json.JSONDecodeError):
+            pass
 
-    # Build the statement
-    statement = {
-        "statementId": rel.get("statementId", _generate_statement_id(rel, "relationship")),
-        "recordId": rel.get("recordId", _generate_record_id(rel, "relationship")),
-        "recordType": "relationship",
-        "recordDetails": record_details,
-    }
+    statement = _build_statement_envelope(
+        first, "relationship", extras, publisher_config,
+        is_round_trip=bool(first.get("statementId")),
+    )
+    statement["recordDetails"] = record_details
 
-    # Optional fields
-    if rel.get("statementDate"):
-        statement["statementDate"] = rel["statementDate"]
-    if rel.get("recordStatus"):
-        statement["recordStatus"] = rel["recordStatus"]
-    if rel.get("declarationSubject"):
-        statement["declarationSubject"] = rel["declarationSubject"]
-
-    # Source
-    source = _parse_json_prop(rel, "source_json")
-    if source:
-        statement["source"] = source
-    elif not is_round_trip:
-        statement["source"] = _build_source(publisher_config)
-
-    # Annotations
-    annotations = _parse_json_prop(rel, "annotations_json")
-    if annotations:
-        statement["annotations"] = annotations
-
-    # Publication details
-    statement["publicationDetails"] = _build_publication_details(rel, publisher_config)
+    replaces = first.get("replacesStatements") or []
+    if replaces:
+        statement["replacesStatements"] = list(replaces)
 
     return statement
 
 
-def _reconstruct_interest(rel: dict) -> Optional[dict]:
-    """Reconstruct a BODS interest object from flat relationship properties."""
-    interest = {}
+def _rebuild_unspecified(props: dict):
+    """Rebuild a BODS inline ``unspecified`` object from a sentinel's properties.
 
-    # Interest type
-    interest_types = rel.get("interestTypes")
-    if isinstance(interest_types, str):
+    Returns ``None`` when the sentinel was anchoring an explicit
+    ``"interestedParty": null`` (the UK PSC retired-relationship pattern).
+    """
+    if props.get("partyValue") == "null":
+        return None
+    out: dict = {}
+    for k in ("describedByPersonStatement", "describedByEntityStatement",
+              "unspecifiedReason", "unspecifiedDescription"):
+        if props.get(k):
+            out[k] = props[k]
+    raw = props.get("extrasJson")
+    if raw:
         try:
-            interest_types = json.loads(interest_types)
-        except (json.JSONDecodeError, TypeError):
-            interest_types = [interest_types]
-    if interest_types and isinstance(interest_types, list) and interest_types[0]:
-        interest["type"] = interest_types[0]
+            extra = json.loads(raw)
+            for k, v in (extra or {}).items():
+                out.setdefault(k, v)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return out
 
-    # Beneficial ownership
-    if rel.get("isBeneficialOwnership") is not None:
-        interest["beneficialOwnershipOrControl"] = bool(rel["isBeneficialOwnership"])
 
-    # Direct or indirect
-    if rel.get("directOrIndirect"):
-        interest["directOrIndirect"] = rel["directOrIndirect"]
+# ---------------------------------------------------------------------------
+# Sub-object rebuilders
+# ---------------------------------------------------------------------------
 
-    # Share
+
+def _rebuild_identifiers(specs) -> list:
+    if not specs:
+        return []
+    items = sorted(specs, key=lambda s: s.get("ordinal", 0) or 0)
+    out = []
+    for spec in items:
+        ident = spec.get("ident") or {}
+        # Per-edge null-field markers — fields the original BODS identifier
+        # had as explicit `null` rather than absent.
+        null_fields = set(spec.get("nullFields") or [])
+        entry = {}
+        if ident.get("id"):
+            entry["id"] = ident["id"]
+        for field in ("scheme", "schemeName", "uri"):
+            if field in null_fields:
+                entry[field] = None
+            elif ident.get(field):
+                entry[field] = ident[field]
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _rebuild_addresses(specs) -> list:
+    if not specs:
+        return []
+    items = sorted(specs, key=lambda s: s.get("ordinal", 0) or 0)
+    out = []
+    for spec in items:
+        addr = spec.get("addr") or {}
+        country = spec.get("country") or {}
+        entry = {}
+        if spec.get("type"):
+            entry["type"] = spec["type"]
+        if addr.get("address"):
+            entry["address"] = addr["address"]
+        elif addr.get("addressEmpty"):
+            entry["address"] = ""
+        if addr.get("postCode"):
+            entry["postCode"] = addr["postCode"]
+        country_out: dict = {}
+        if country.get("code"):
+            country_out["code"] = country["code"]
+        if country.get("name"):
+            country_out["name"] = country["name"]
+        # Fallback: BODS country objects with `name` only (no `code`) are
+        # stored on the Address node since there's no key to anchor a
+        # :Country node.
+        if not country_out and addr.get("countryName"):
+            country_out["name"] = addr["countryName"]
+        # If the source had an explicit `code: ""` or `code: null`,
+        # re-emit it. (For ISO-coded countries we'd have set `code` via
+        # the LOCATED_IN edge above; this only fires for the no-code path.)
+        if country_out and "code" not in country_out:
+            shape = addr.get("countryCodeShape")
+            if shape == "empty":
+                country_out["code"] = ""
+            elif shape == "null":
+                country_out["code"] = None
+        if country_out:
+            entry["country"] = country_out
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _rebuild_country_list(codes, names) -> list:
+    if not codes:
+        return []
+    names = names or []
+    out = []
+    for i, code in enumerate(codes):
+        if not code:
+            continue
+        entry = {"code": code}
+        if i < len(names) and names[i]:
+            entry["name"] = names[i]
+        out.append(entry)
+    return out
+
+
+def _rebuild_names(node: dict) -> list:
+    """Prefer the preserved namesJson if present (multi-name records); else
+    rebuild a single name from scalar properties."""
+    raw = node.get("namesJson")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and parsed:
+                return parsed
+        except (TypeError, json.JSONDecodeError):
+            pass
+
+    full = node.get("fullName") or node.get("name")
+    if not full and not node.get("familyName") and not node.get("givenName"):
+        return []
+
+    entry = {}
+    if full:
+        entry["fullName"] = full
+    if node.get("familyName"):
+        entry["familyName"] = node["familyName"]
+    if node.get("givenName"):
+        entry["givenName"] = node["givenName"]
+    if node.get("patronymicName"):
+        entry["patronymicName"] = node["patronymicName"]
+    if node.get("nameType"):
+        entry["type"] = node["nameType"]
+    return [entry]
+
+
+def _rebuild_political_exposure(node: dict) -> dict:
+    pep = {}
+    if node.get("pepStatus"):
+        pep["status"] = node["pepStatus"]
+    raw = node.get("politicalExposureDetailsJson")
+    if raw:
+        try:
+            pep["details"] = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return pep
+
+
+def _rebuild_source(node: dict) -> dict:
+    out = {}
+    types = node.get("sourceTypes")
+    if isinstance(types, list) and types:
+        out["type"] = list(types)
+    if node.get("sourceDescription"):
+        out["description"] = node["sourceDescription"]
+    if node.get("sourceUrl"):
+        out["url"] = node["sourceUrl"]
+    if node.get("sourceRetrievedAt"):
+        out["retrievedAt"] = node["sourceRetrievedAt"]
+    if node.get("sourceAssertedByJson"):
+        try:
+            out["assertedBy"] = json.loads(node["sourceAssertedByJson"])
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return out
+
+
+def _rebuild_annotations(node: dict) -> list:
+    motivations = node.get("annotationMotivations") or []
+    if not motivations:
+        return []
+    descriptions = node.get("annotationDescriptions") or []
+    pointers = node.get("annotationStatementPointers") or []
+    pointer_present = node.get("annotationStatementPointerPresent") or []
+    dates = node.get("annotationCreationDates") or []
+    urls = node.get("annotationUrls") or []
+    created_by_names = node.get("annotationCreatedByNames") or []
+    created_by_uris = node.get("annotationCreatedByUris") or []
+
+    out = []
+    for i, mot in enumerate(motivations):
+        entry = {}
+        if mot:
+            entry["motivation"] = mot
+        if i < len(descriptions) and descriptions[i]:
+            entry["description"] = descriptions[i]
+        # Empty-string `statementPointerTarget` is preserved when the
+        # source had the key present (BODS producers like GLEIF emit
+        # `statementPointerTarget: ""` explicitly).
+        if i < len(pointer_present) and pointer_present[i]:
+            entry["statementPointerTarget"] = (
+                pointers[i] if i < len(pointers) else ""
+            )
+        elif i < len(pointers) and pointers[i]:
+            entry["statementPointerTarget"] = pointers[i]
+        if i < len(dates) and dates[i]:
+            entry["creationDate"] = dates[i]
+        if i < len(urls) and urls[i]:
+            entry["url"] = urls[i]
+        created_by = {}
+        if i < len(created_by_names) and created_by_names[i]:
+            created_by["name"] = created_by_names[i]
+        if i < len(created_by_uris) and created_by_uris[i]:
+            created_by["uri"] = created_by_uris[i]
+        if created_by:
+            entry["createdBy"] = created_by
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _rebuild_public_listing(node: dict) -> dict:
+    out = {}
+    if node.get("hasPublicListing") is not None:
+        out["hasPublicListing"] = bool(node["hasPublicListing"])
+    if node.get("companyFilingsURL"):
+        out["companyFilingsURL"] = node["companyFilingsURL"]
+    raw = node.get("securitiesListingsJson")
+    if raw:
+        try:
+            out["securitiesListings"] = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    return out
+
+
+def _rebuild_formed_by_statute(node: dict) -> dict:
+    out = {}
+    if node.get("formedByStatuteName"):
+        out["name"] = node["formedByStatuteName"]
+    if node.get("formedByStatuteDate"):
+        out["date"] = node["formedByStatuteDate"]
+    return out
+
+
+def _rebuild_interest(props: dict) -> dict:
+    """Rebuild a single BODS interest object from an :Interest node's props.
+    Omits ``type`` when the original interest had no explicit type set."""
+    entry: dict = {}
+    if props.get("bodsInterestType"):
+        entry["type"] = props["bodsInterestType"]
+    if props.get("directOrIndirect"):
+        entry["directOrIndirect"] = props["directOrIndirect"]
+    if props.get("beneficialOwnershipOrControl") is not None:
+        entry["beneficialOwnershipOrControl"] = bool(props["beneficialOwnershipOrControl"])
+
     share = {}
-    if rel.get("shareExact") is not None:
-        share["exact"] = float(rel["shareExact"])
-    if rel.get("shareMinimum") is not None:
-        share["minimum"] = float(rel["shareMinimum"])
-    if rel.get("shareMaximum") is not None:
-        share["maximum"] = float(rel["shareMaximum"])
+    if props.get("shareExact") is not None:
+        share["exact"] = _coerce_share(props["shareExact"])
+    if props.get("shareMinimum") is not None:
+        share["minimum"] = _coerce_share(props["shareMinimum"])
+    if props.get("shareMaximum") is not None:
+        share["maximum"] = _coerce_share(props["shareMaximum"])
+    if props.get("shareExclusiveMin") is not None:
+        share["exclusiveMinimum"] = _coerce_share(props["shareExclusiveMin"])
+    if props.get("shareExclusiveMax") is not None:
+        share["exclusiveMaximum"] = _coerce_share(props["shareExclusiveMax"])
     if share:
-        interest["share"] = share
+        entry["share"] = share
 
-    # Dates
-    if rel.get("interestStartDate"):
-        interest["startDate"] = rel["interestStartDate"]
-    if rel.get("interestEndDate"):
-        interest["endDate"] = rel["interestEndDate"]
+    if props.get("startDate"):
+        entry["startDate"] = props["startDate"]
+    if props.get("endDate"):
+        entry["endDate"] = props["endDate"]
+    if props.get("details"):
+        entry["details"] = props["details"]
 
-    return interest if interest else None
+    raw_extras = props.get("interestExtrasJson")
+    if raw_extras:
+        try:
+            extras = json.loads(raw_extras)
+            for k, v in (extras or {}).items():
+                entry.setdefault(k, v)
+        except (TypeError, json.JSONDecodeError):
+            pass
+
+    return entry
 
 
-def _parse_json_prop(obj: dict, key: str):
-    """Parse a JSON-serialised property, returning None if not present or invalid."""
-    value = obj.get(key)
-    if value is None:
-        return None
-    if isinstance(value, (list, dict)):
-        return value  # Already parsed
+# ---------------------------------------------------------------------------
+# Statement envelope
+# ---------------------------------------------------------------------------
+
+
+def _build_statement_envelope(
+    node: dict,
+    record_type: str,
+    extras: Optional[dict],
+    publisher_config: PublisherConfig,
+    is_round_trip: bool,
+) -> dict:
+    statement_id = node.get("statementId") or _generate_statement_id(node, record_type)
+    record_id = node.get("recordId") or _generate_record_id(node, record_type)
+
+    out = {
+        "statementId": statement_id,
+        "recordId": record_id,
+        "recordType": record_type,
+    }
+
+    if node.get("statementDate"):
+        out["statementDate"] = node["statementDate"]
+    if node.get("recordStatus"):
+        out["recordStatus"] = node["recordStatus"]
+    if node.get("declarationSubject"):
+        out["declarationSubject"] = node["declarationSubject"]
+
+    source = _rebuild_source(node)
+    if source:
+        out["source"] = source
+    elif not is_round_trip:
+        out["source"] = _build_default_source(publisher_config)
+
+    annotations = _rebuild_annotations(node)
+    if annotations:
+        out["annotations"] = annotations
+    elif node.get("annotationsKeyPresent"):
+        # Source had `annotations: []` — preserve the empty array.
+        out["annotations"] = []
+
+    out["publicationDetails"] = _rebuild_publication_details(node, publisher_config)
+
+    # Merge any top-level extras (publisher-specific fields the forward mapper
+    # didn't recognise).
+    if extras and extras.get("statement"):
+        for k, v in extras["statement"].items():
+            out.setdefault(k, v)
+
+    return out
+
+
+def _rebuild_publication_details(node: dict, publisher_config: PublisherConfig) -> dict:
+    publisher = {"name": node.get("publisherName") or publisher_config.publisher_name}
+    if node.get("publisherUrl"):
+        publisher["url"] = node["publisherUrl"]
+    elif publisher_config.publisher_url:
+        publisher["url"] = publisher_config.publisher_url
+    pub = {
+        "publicationDate": node.get("publicationDate") or str(date.today()),
+        "bodsVersion": node.get("bodsVersion") or publisher_config.bods_version,
+        "publisher": publisher,
+    }
+    if node.get("publicationLicense"):
+        pub["license"] = node["publicationLicense"]
+    elif publisher_config.license_url:
+        pub["license"] = publisher_config.license_url
+    return pub
+
+
+def _build_default_source(publisher_config: PublisherConfig) -> dict:
+    return {
+        "type": [publisher_config.source_type],
+        "description": publisher_config.source_description,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_extras(node_or_first_interest: dict) -> dict:
+    raw = node_or_first_interest.get("extrasJson")
+    if not raw:
+        return {}
     try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return None
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
 
 
 def _generate_statement_id(obj: dict, record_type: str) -> str:
-    """Generate a deterministic statement ID from node/relationship properties."""
     seed = f"{record_type}:{obj.get('recordId', obj.get('name', str(id(obj))))}"
     return str(uuid.uuid5(BODS_NEO4J_NAMESPACE, seed))
 
 
 def _generate_record_id(obj: dict, record_type: str) -> str:
-    """Generate a record ID for nodes that don't have one."""
     name = obj.get("name", "")
     node_id = obj.get("primaryIdentifierId", name)
     return f"neo4j-{record_type}-{node_id}" if node_id else f"neo4j-{record_type}-{id(obj)}"
 
 
-def _build_source(publisher_config: PublisherConfig) -> dict:
-    """Build a BODS source object."""
-    source = {
-        "type": [publisher_config.source_type],
-        "description": publisher_config.source_description,
-    }
-    return source
-
-
-def _build_publication_details(obj: dict, publisher_config: PublisherConfig) -> dict:
-    """Build BODS publication details, preferring preserved values."""
-    pub = {
-        "publicationDate": obj.get("publicationDate", str(date.today())),
-        "bodsVersion": obj.get("bodsVersion", publisher_config.bods_version),
-        "publisher": {
-            "name": obj.get("publisherName", publisher_config.publisher_name),
-        },
-    }
-    if publisher_config.publisher_url:
-        pub["publisher"]["url"] = publisher_config.publisher_url
-    if publisher_config.license_url:
-        pub["license"] = publisher_config.license_url
-    return pub
+def _coerce_share(value):
+    """BODS share fields are numeric. Neo4j returns floats; preserve ints
+    when the value is integral (so `100` round-trips as `100`, not `100.0`).
+    Booleans pass through unchanged so legacy producers that use
+    `exclusiveMinimum: true` round-trip cleanly."""
+    if isinstance(value, bool):
+        return value
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return value
+    if f.is_integer():
+        return int(f)
+    return f

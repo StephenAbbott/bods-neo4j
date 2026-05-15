@@ -30,13 +30,32 @@ def read_bods_file(file_path: Union[str, Path]) -> Generator[dict, None, None]:
     if suffix in (".jsonl", ".ndjson"):
         yield from _read_jsonl(file_path)
     elif suffix == ".json":
-        yield from _read_json(file_path)
+        # Real-world BODS bulk dumps (GLEIF, UK PSC) often use `.json`
+        # extension even when the content is JSONL (one statement per
+        # line). Sniff the first non-whitespace char to pick the right
+        # parser — `[` means JSON array, `{` means JSONL.
+        if _looks_like_json_array(file_path):
+            yield from _read_json(file_path)
+        else:
+            yield from _read_jsonl(file_path)
     else:
         # Try JSONL first (more memory-efficient), fall back to JSON
         try:
             yield from _read_jsonl(file_path)
         except json.JSONDecodeError:
             yield from _read_json(file_path)
+
+
+def _looks_like_json_array(file_path: Path) -> bool:
+    """Peek at the first non-whitespace character: `[` = JSON array."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        # Read at most 1 KB to find the first non-whitespace char.
+        chunk = f.read(1024)
+    for ch in chunk:
+        if ch.isspace():
+            continue
+        return ch == "["
+    return False
 
 
 def _read_jsonl(file_path: Path) -> Generator[dict, None, None]:

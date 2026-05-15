@@ -54,9 +54,10 @@ bods-neo4j to-csv examples/sample_data/sample_bods.json -o ./neo4j_export
 ```
 
 This produces:
-- `entities.csv`, `persons.csv`, `relationships.csv`
-- `import.cypher` — for loading into a running Neo4j instance
-- `import.sh` — for `neo4j-admin` bulk import
+- One CSV per node label (`entity.csv`, `person.csv`, `identifier.csv`, `address.csv`, `country.csv`, `unspecified_party.csv`)
+- One CSV per relationship type (`owns.csv`, `controls.csv`, `manages.csv`, `is_party_to.csv`, `has_other_interest.csv`, `has_identifier.csv`, `has_address.csv`, `located_in.csv`, `registered_in.csv`, `born_in.csv`)
+- `import.cypher` — `LOAD CSV` script for a running Neo4j instance (includes constraints + entity subtype-label fixups)
+- `import.sh` — convenience wrapper that pipes `import.cypher` through `cypher-shell`
 
 ### 3. BODS → Neo4j (direct driver load)
 
@@ -93,30 +94,45 @@ bods-neo4j graph-info --uri bolt://localhost:7687 --username neo4j --password bo
 
 ## Neo4j Graph Schema
 
-BODS statements map to Neo4j's property graph model as follows:
+The model is graph-native: things BODS treats as identities (identifiers, addresses, jurisdictions) are first-class nodes, and the generic interest edge splits into a 5-family taxonomy. Each BODS interest in a relationship statement becomes one typed edge carrying the interest payload directly — no intermediate `:Interest` node.
 
 ### Nodes
 
-| BODS Statement | Neo4j Label(s) | Key Properties |
-|---|---|---|
-| Entity (registeredEntity) | `:Entity:RegisteredEntity` | name, recordId, jurisdictionCode, entityType |
-| Entity (trust) | `:Entity:Arrangement:Trust` | name, recordId |
-| Entity (stateBody) | `:Entity:StateBody` | name, recordId |
-| Entity (nomination) | `:Entity:Arrangement:Nomination` | name, recordId |
-| Person (knownPerson) | `:Person` | name, recordId, birthDate, nationalityCode |
+| Label | BODS source | Key | Notes |
+|---|---|---|---|
+| `:Entity` (+ subtype labels: `RegisteredEntity` / `LegalEntity` / `Arrangement` / `Trust` / `Nomination` / `StateBody` / …) | entity statement | `recordId` | Inline statement metadata (statementId, publicationDate, publisherName, source*, annotation*). |
+| `:Person` | person statement | `recordId` | Nationalities / tax residencies as inline parallel-list properties (`nationalityCodes`, `nationalityNames`). |
+| `:Identifier` | `identifiers[]` (entity / person) | `uid` = `scheme\|id` | Deduplicated globally — the same Companies-House ID is one node across all statements that reference it. |
+| `:Address` | `addresses[]` (entity / person) | `uid` = sha256(normalised content) | The BODS address `type` lives on the `[:HAS_ADDRESS {type, ordinal}]` edge so the same address can play multiple roles. |
+| `:Country` | entity jurisdiction + address country leg | `code` (ISO 3166-1 alpha-2) | Shared dedup point. Nationality / tax residency stay inline on `:Person`. |
+| `:UnspecifiedParty` | inline `unspecifiedReason` party object (subject or interestedParty) | `uid` = `statementId:side` | Sentinel — preserves BODS's inline-unspecified shape when there is no recordId to anchor the typed edge to. |
 
 ### Relationships
 
-| BODS Concept | Neo4j Relationship | Direction | Key Properties |
-|---|---|---|---|
-| Ownership/Control interest | `[:HAS_INTEREST]` | `(interestedParty)-[:HAS_INTEREST]->(subject)` | interestTypes, shareMinimum, shareMaximum, isBeneficialOwnership |
+```
+(party:Person|Entity)-[:OWNS|CONTROLS|MANAGES|IS_PARTY_TO|HAS_OTHER_INTEREST {…interest payload + statement metadata}]->(subject:Entity|Person)
+(:Entity|:Person)-[:HAS_IDENTIFIER {ordinal, isPrimary}]->(:Identifier)
+(:Entity|:Person)-[:HAS_ADDRESS {type, ordinal}]->(:Address)-[:LOCATED_IN]->(:Country)
+(:Entity)-[:REGISTERED_IN]->(:Country)
+(:Person)-[:BORN_IN]->(:Address)
+(:Entity|:Person)-[:REPLACES]->(same-label)
+```
+
+A BODS relationship statement with N interests in its `interests[]` array becomes N parallel typed edges between the same (party, subject) pair. Every edge carries the statement-level metadata (`statementId`, `recordId`, `publicationDate`, `publisherName`, `sourceTypes`, …) duplicated, plus the per-interest payload (`bodsInterestType`, `family`, `shareExact/Min/Max`, `directOrIndirect`, `beneficialOwnershipOrControl`, `startDate`, `endDate`, `details`). The reverse mapper groups edges by `statementId` and sorts by `interestIndex` to rebuild a single BODS statement.
+
+The 23 BODS interest types collapse into five Cypher relationship-type families for fast traversal selectivity; the original interest type is preserved verbatim as `bodsInterestType` on each edge so the round-trip is lossless.
+
+| Family | BODS interest types covered |
+|---|---|
+| `OWNS` | shareholding, rightsToProfitOrIncome, rightsToSurplusAssetsOnDissolution, rightToProfitOrIncomeFromAssets, enjoymentAndUseOfAssets, rightsGrantedByContract, conditionalRightsGrantedByContract |
+| `CONTROLS` | votingRights, controlViaCompanyRulesOrArticles, controlByLegalFramework, otherInfluenceOrControl, appointmentOfBoard |
+| `MANAGES` | seniorManagingOfficial, boardMember, boardChair |
+| `IS_PARTY_TO` | settlor, trustee, protector, beneficiaryOfLegalArrangement, nominee, nominator |
+| `HAS_OTHER_INTEREST` | unknownInterest, unpublishedInterest, plus any forward-compat values |
 
 ### Round-Trip Fidelity
 
-All BODS metadata is preserved as node/relationship properties:
-- Complex nested structures (identifiers, addresses, interests arrays) are stored as `*_json` properties
-- Statement IDs, record IDs, publication details, and source information are preserved
-- Data can be converted back to valid BODS v0.4 format without loss
+The reverse mapper rebuilds `identifiers` / `addresses` by aggregating their related graph nodes, and rebuilds `interests[]` by grouping typed edges that share a `statementId` and sorting by `interestIndex`. No `*_json` blobs on nodes or edges. Any publisher-specific or forward-compat fields the structured extraction does not recognise are preserved verbatim in a single `extrasJson` catch-all per node / first edge. Data can be converted back to valid BODS v0.4 format without loss.
 
 ## Graph Analysis Queries
 
@@ -148,18 +164,20 @@ cycles = find_circular_ownership(config)
 
 ### Key Cypher Queries
 
+With BODS interests carried directly on the typed edge, ownership chains are single-hop variable-length traversals.
+
 **Find all owners of an entity:**
 ```cypher
-MATCH path = (owner)-[:HAS_INTEREST*1..10]->(target:Entity {recordId: "rec-entity-alpha"})
-WHERE owner:Person OR (owner:Entity AND NOT EXISTS {
-    MATCH (upstream)-[:HAS_INTEREST]->(owner)
-})
-RETURN owner.name, length(path) AS depth
+MATCH path = (owner)-[:OWNS|CONTROLS*1..10]->(target:Entity {recordId: "rec-entity-alpha"})
+WHERE owner:Person OR
+      (owner:Entity AND NOT EXISTS { ()-[:OWNS|CONTROLS]->(owner) })
+RETURN owner.name, length(path) AS depth,
+       [r IN relationships(path) | r.bodsInterestType] AS interestTypes
 ```
 
 **Calculate effective ownership through chains:**
 ```cypher
-MATCH path = (person:Person)-[:HAS_INTEREST*1..10]->(entity:Entity)
+MATCH path = (person:Person)-[:OWNS*1..10]->(entity:Entity)
 WITH person, entity, path,
      reduce(pct = 1.0, r IN relationships(path) |
          CASE WHEN r.shareMinimum IS NOT NULL
@@ -171,7 +189,7 @@ RETURN person.name, entity.name, effectivePct
 
 **Detect circular ownership:**
 ```cypher
-MATCH path = (e:Entity)-[:HAS_INTEREST*2..10]->(e)
+MATCH path = (e:Entity)-[:OWNS|CONTROLS*2..10]->(e)
 RETURN e.name, length(path) AS cycleLength,
        [n IN nodes(path) | n.name] AS cycleNames
 ```
@@ -179,9 +197,9 @@ RETURN e.name, length(path) AS cycleLength,
 **Find entities without identified UBOs:**
 ```cypher
 MATCH (e:Entity)
-WHERE NOT EXISTS { MATCH (p:Person)-[:HAS_INTEREST*]->(e) }
-AND EXISTS { MATCH ()-[:HAS_INTEREST]->(e) }
-RETURN e.name, e.jurisdictionCode
+WHERE EXISTS { ()-[:OWNS|CONTROLS]->(e) }
+  AND NOT EXISTS { (:Person)-[:OWNS|CONTROLS*1..20]->(e) }
+RETURN e.name, head([(e)-[:REGISTERED_IN]->(c:Country) | c.code]) AS jurisdictionCode
 ```
 
 ## Comparison with Other Approaches

@@ -1,30 +1,32 @@
 """Ultimate Beneficial Owner (UBO) detection queries for BODS Neo4j graphs.
 
-These queries traverse ownership chains to identify the natural persons or
-entities at the top of ownership structures — the ultimate beneficial owners.
+The graph carries BODS interests directly on typed relationships
+(`:OWNS|:CONTROLS|:MANAGES|:IS_PARTY_TO|:HAS_OTHER_INTEREST`), so ownership
+chains are single-hop variable-length traversals:
 
-Key concepts:
-- A UBO is a natural person (Person node) with significant ownership/control
-  over an entity, either directly or through intermediary entities.
-- Ownership percentage is calculated by multiplying shares along chains.
-- Chains terminate at Person nodes (natural persons) or at Entity nodes
-  with no further inbound HAS_INTEREST relationships.
+    MATCH path = (owner)-[:OWNS|CONTROLS*1..10]->(target:Entity)
+
+For UBO traversal we restrict the rel-type union to the
+``OWNERSHIP_CONTROL_REL_TYPES`` constant (OWNS + CONTROLS) — management /
+arrangement edges aren't typically counted as beneficial-ownership chains.
 """
 
 import logging
-from typing import Optional
 
 from ..config import Neo4jConfig
+from ..utils.bods_schema import OWNERSHIP_CONTROL_REL_TYPES
 from ..utils.neo4j_helpers import neo4j_driver
 
 logger = logging.getLogger(__name__)
 
-# Find all direct and indirect owners of a specific entity
-FIND_OWNERS_QUERY = """\
-MATCH path = (owner)-[:HAS_INTEREST*1..{max_depth}]->(target:Entity {{recordId: $recordId}})
-WHERE owner:Person OR (owner:Entity AND NOT EXISTS {{
-    MATCH (upstream)-[:HAS_INTEREST]->(owner)
-}})
+# Cypher pipe-union of ownership/control rel types: "OWNS|CONTROLS"
+_OWN_CTRL = "|".join(OWNERSHIP_CONTROL_REL_TYPES)
+
+
+FIND_OWNERS_QUERY = f"""
+MATCH path = (owner)-[:{_OWN_CTRL}*1..{{max_depth}}]->(target:Entity {{{{recordId: $recordId}}}})
+WHERE owner:Person OR
+      (owner:Entity AND NOT EXISTS {{{{ ()-[:{_OWN_CTRL}]->(owner) }}}})
 RETURN owner.recordId AS ownerRecordId,
        owner.name AS ownerName,
        labels(owner) AS ownerLabels,
@@ -32,18 +34,17 @@ RETURN owner.recordId AS ownerRecordId,
        [r IN relationships(path) | r.shareMinimum] AS shareMinimums,
        [r IN relationships(path) | r.shareMaximum] AS shareMaximums,
        [r IN relationships(path) | r.shareExact] AS shareExacts,
-       [r IN relationships(path) | r.isBeneficialOwnership] AS boFlags,
-       [r IN relationships(path) | r.interestTypes] AS interestTypes,
+       [r IN relationships(path) | r.beneficialOwnershipOrControl] AS boFlags,
+       [r IN relationships(path) | r.bodsInterestType] AS interestTypes,
        [n IN nodes(path) | n.name] AS pathNames
 ORDER BY depth
 """
 
-# Find all entities owned/controlled by a specific person or entity
-FIND_OWNED_ENTITIES_QUERY = """\
-MATCH path = (owner {{recordId: $recordId}})-[:HAS_INTEREST*1..{max_depth}]->(target:Entity)
+FIND_OWNED_ENTITIES_QUERY = f"""
+MATCH path = (owner {{{{recordId: $recordId}}}})-[:{_OWN_CTRL}*1..{{max_depth}}]->(target:Entity)
 RETURN target.recordId AS entityRecordId,
        target.name AS entityName,
-       target.jurisdictionCode AS jurisdictionCode,
+       head([(target)-[:REGISTERED_IN]->(c:Country) | c.code]) AS jurisdictionCode,
        target.entityType AS entityType,
        length(path) AS depth,
        [r IN relationships(path) | r.shareMinimum] AS shareMinimums,
@@ -53,12 +54,9 @@ RETURN target.recordId AS entityRecordId,
 ORDER BY depth
 """
 
-# Find all Person UBOs (natural persons at the top of ownership chains)
-FIND_ALL_PERSON_UBOS_QUERY = """\
-MATCH path = (person:Person)-[:HAS_INTEREST*1..{max_depth}]->(entity:Entity)
-WHERE NOT EXISTS {{
-    MATCH (upstream)-[:HAS_INTEREST]->(person)
-}}
+FIND_ALL_PERSON_UBOS_QUERY = f"""
+MATCH path = (person:Person)-[:{_OWN_CTRL}*1..{{max_depth}}]->(entity:Entity)
+WHERE NOT EXISTS {{{{ ()-[:{_OWN_CTRL}]->(person) }}}}
 WITH person, entity, path,
      reduce(minPct = 1.0, r IN relationships(path) |
          CASE WHEN r.shareMinimum IS NOT NULL
@@ -80,18 +78,13 @@ RETURN person.recordId AS personRecordId,
 ORDER BY effectiveMinPct DESC
 """
 
-# Find entities with no identified UBO (no Person at top of chain)
-FIND_ENTITIES_WITHOUT_UBOS_QUERY = """\
+FIND_ENTITIES_WITHOUT_UBOS_QUERY = f"""
 MATCH (e:Entity)
-WHERE NOT EXISTS {
-    MATCH (p:Person)-[:HAS_INTEREST*]->(e)
-}
-AND EXISTS {
-    MATCH ()-[:HAS_INTEREST]->(e)
-}
+WHERE EXISTS {{ ()-[:{_OWN_CTRL}]->(e) }}
+  AND NOT EXISTS {{ (:Person)-[:{_OWN_CTRL}*1..20]->(e) }}
 RETURN e.recordId AS recordId,
        e.name AS name,
-       e.jurisdictionCode AS jurisdictionCode,
+       head([(e)-[:REGISTERED_IN]->(c:Country) | c.code]) AS jurisdictionCode,
        e.entityType AS entityType
 ORDER BY e.name
 """
@@ -102,31 +95,18 @@ def find_owners(
     neo4j_config: Neo4jConfig = None,
     max_depth: int = 10,
 ) -> list:
-    """Find all direct and indirect owners of an entity.
-
-    Args:
-        record_id: The recordId of the target entity
-        neo4j_config: Neo4j connection configuration
-        max_depth: Maximum ownership chain depth to traverse
-
-    Returns:
-        List of owner dictionaries with ownership path details
-    """
+    """Find all direct and indirect owners of an entity."""
     if neo4j_config is None:
         neo4j_config = Neo4jConfig.from_env()
-
     query = FIND_OWNERS_QUERY.format(max_depth=max_depth)
-
     with neo4j_driver(neo4j_config) as driver:
         result = driver.execute_query(
-            query,
-            parameters_={"recordId": record_id},
+            query, parameters_={"recordId": record_id},
             database_=neo4j_config.database,
         )
-
         owners = []
         for record in result.records:
-            owner = {
+            owners.append({
                 "ownerRecordId": record["ownerRecordId"],
                 "ownerName": record["ownerName"],
                 "ownerType": "person" if "Person" in record["ownerLabels"] else "entity",
@@ -137,9 +117,7 @@ def find_owners(
                     record["shareMaximums"],
                     record["shareExacts"],
                 ),
-            }
-            owners.append(owner)
-
+            })
         logger.info("Found %d owners for entity %s", len(owners), record_id)
         return owners
 
@@ -149,31 +127,18 @@ def find_owned_entities(
     neo4j_config: Neo4jConfig = None,
     max_depth: int = 10,
 ) -> list:
-    """Find all entities owned or controlled by a person or entity.
-
-    Args:
-        record_id: The recordId of the owner (person or entity)
-        neo4j_config: Neo4j connection configuration
-        max_depth: Maximum ownership chain depth to traverse
-
-    Returns:
-        List of owned entity dictionaries with ownership path details
-    """
+    """Find all entities owned or controlled by a person or entity."""
     if neo4j_config is None:
         neo4j_config = Neo4jConfig.from_env()
-
     query = FIND_OWNED_ENTITIES_QUERY.format(max_depth=max_depth)
-
     with neo4j_driver(neo4j_config) as driver:
         result = driver.execute_query(
-            query,
-            parameters_={"recordId": record_id},
+            query, parameters_={"recordId": record_id},
             database_=neo4j_config.database,
         )
-
         entities = []
         for record in result.records:
-            entity = {
+            entities.append({
                 "entityRecordId": record["entityRecordId"],
                 "entityName": record["entityName"],
                 "jurisdictionCode": record["jurisdictionCode"],
@@ -185,9 +150,7 @@ def find_owned_entities(
                     record["shareMaximums"],
                     record["shareExacts"],
                 ),
-            }
-            entities.append(entity)
-
+            })
         logger.info("Found %d owned entities for %s", len(entities), record_id)
         return entities
 
@@ -197,31 +160,18 @@ def find_all_ubos(
     threshold: float = 25.0,
     max_depth: int = 10,
 ) -> list:
-    """Find all ultimate beneficial owners across the entire graph.
-
-    Args:
-        neo4j_config: Neo4j connection configuration
-        threshold: Minimum effective ownership percentage to qualify as UBO
-        max_depth: Maximum ownership chain depth to traverse
-
-    Returns:
-        List of UBO dictionaries with person-to-entity relationships
-    """
+    """Find all ultimate beneficial owners across the graph."""
     if neo4j_config is None:
         neo4j_config = Neo4jConfig.from_env()
-
     query = FIND_ALL_PERSON_UBOS_QUERY.format(max_depth=max_depth)
-
     with neo4j_driver(neo4j_config) as driver:
         result = driver.execute_query(
-            query,
-            parameters_={"threshold": threshold},
+            query, parameters_={"threshold": threshold},
             database_=neo4j_config.database,
         )
-
         ubos = []
         for record in result.records:
-            ubo = {
+            ubos.append({
                 "personRecordId": record["personRecordId"],
                 "personName": record["personName"],
                 "entityRecordId": record["entityRecordId"],
@@ -230,9 +180,7 @@ def find_all_ubos(
                 "effectiveMinPct": record["effectiveMinPct"],
                 "effectiveMaxPct": record["effectiveMaxPct"],
                 "pathNames": record["pathNames"],
-            }
-            ubos.append(ubo)
-
+            })
         logger.info("Found %d UBO relationships (threshold: %.1f%%)", len(ubos), threshold)
         return ubos
 
@@ -240,19 +188,14 @@ def find_all_ubos(
 def find_entities_without_ubos(
     neo4j_config: Neo4jConfig = None,
 ) -> list:
-    """Find entities with incoming ownership but no natural person UBO.
-
-    These are entities that may have opaque ownership structures.
-    """
+    """Find entities with incoming ownership but no natural-person UBO."""
     if neo4j_config is None:
         neo4j_config = Neo4jConfig.from_env()
-
     with neo4j_driver(neo4j_config) as driver:
         result = driver.execute_query(
             FIND_ENTITIES_WITHOUT_UBOS_QUERY,
             database_=neo4j_config.database,
         )
-
         entities = []
         for record in result.records:
             entities.append({
@@ -261,7 +204,6 @@ def find_entities_without_ubos(
                 "jurisdictionCode": record["jurisdictionCode"],
                 "entityType": record["entityType"],
             })
-
         logger.info("Found %d entities without identified UBOs", len(entities))
         return entities
 
@@ -271,13 +213,9 @@ def _calculate_effective_ownership(
     share_maximums: list,
     share_exacts: list,
 ) -> dict:
-    """Calculate effective ownership percentage through a chain.
-
-    Multiplies share percentages along each link in the ownership chain.
-    """
+    """Calculate effective ownership percentage through a chain."""
     result = {}
 
-    # Try exact values first
     exacts = [s for s in (share_exacts or []) if s is not None]
     if exacts:
         effective = 1.0
@@ -286,7 +224,6 @@ def _calculate_effective_ownership(
         result["exact"] = round(effective * 100.0, 4)
         return result
 
-    # Otherwise use min/max ranges
     mins = [s for s in (share_minimums or []) if s is not None]
     maxs = [s for s in (share_maximums or []) if s is not None]
 

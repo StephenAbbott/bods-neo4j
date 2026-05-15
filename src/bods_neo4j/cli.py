@@ -58,16 +58,22 @@ def to_csv(bods_file, output_dir, verbose):
     counts = export_to_csv(bods_file, output_dir)
 
     click.echo(f"\nExport complete:")
-    click.echo(f"  Entities:      {counts['entities']:,}")
-    click.echo(f"  Persons:       {counts['persons']:,}")
-    click.echo(f"  Relationships: {counts['relationships']:,}")
-    click.echo(f"  Skipped:       {counts['skipped']:,}")
+    click.echo(f"  Entity statements:       {counts['entity_statements']:,}")
+    click.echo(f"  Person statements:       {counts['person_statements']:,}")
+    click.echo(f"  Relationship statements: {counts['relationship_statements']:,}")
+    click.echo(f"  Skipped:                 {counts['skipped']:,}")
+    if counts.get("nodes"):
+        click.echo(f"\nNodes written:")
+        for label, n in counts["nodes"].items():
+            click.echo(f"  {label}: {n:,}")
+    if counts.get("edges"):
+        click.echo(f"\nEdges written:")
+        for rel_type, n in counts["edges"].items():
+            click.echo(f"  {rel_type}: {n:,}")
     click.echo(f"\nOutput directory: {output_dir}")
-    click.echo(f"  - entities.csv")
-    click.echo(f"  - persons.csv")
-    click.echo(f"  - relationships.csv")
-    click.echo(f"  - import.cypher (for running Neo4j instance)")
-    click.echo(f"  - import.sh (for neo4j-admin bulk import)")
+    click.echo(f"  - one CSV per node label and per relationship type")
+    click.echo(f"  - import.cypher (LOAD CSV script)")
+    click.echo(f"  - import.sh (cypher-shell wrapper)")
 
 
 @main.command("to-neo4j")
@@ -107,15 +113,19 @@ def to_neo4j(bods_file, uri, username, password, database, batch_size, clear, no
     counts = load_bods_to_neo4j(bods_file, neo4j_config, export_config)
 
     click.echo(f"\nLoad complete:")
-    click.echo(f"  Entities:      {counts['entities']:,}")
-    click.echo(f"  Persons:       {counts['persons']:,}")
-    click.echo(f"  Relationships: {counts['relationships']:,}")
-    click.echo(f"  Skipped:       {counts['skipped']:,}")
+    click.echo(f"  Entity statements:       {counts['entity_statements']:,}")
+    click.echo(f"  Person statements:       {counts['person_statements']:,}")
+    click.echo(f"  Relationship statements: {counts['relationship_statements']:,}")
+    click.echo(f"  Skipped:                 {counts['skipped']:,}")
 
     if "db_stats" in counts:
         click.echo(f"\nDatabase statistics:")
+        click.echo(f"  Nodes:")
         for label, count in counts["db_stats"].get("nodes", {}).items():
-            click.echo(f"  {label}: {count:,}")
+            click.echo(f"    {label}: {count:,}")
+        click.echo(f"  Relationships:")
+        for rel_type, count in counts["db_stats"].get("relationships", {}).items():
+            click.echo(f"    {rel_type}: {count:,}")
 
 
 @main.command("to-bods")
