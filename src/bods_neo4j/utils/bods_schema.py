@@ -104,6 +104,80 @@ ENTITY_SUBTYPE_TO_NEO4J_LABEL = {
     "stateAgency": "StateAgency",
 }
 
+# Interest-type → 5-family Cypher relationship taxonomy.
+#
+# The reified :Interest node carries the original BODS interestType verbatim
+# as `bodsInterestType`, so the round-trip is lossless even though five
+# Cypher relationship types stand in for the 23 BODS interest types.
+#
+# Pattern:  (party)-[:<FAMILY>]->(:Interest:<FAMILY_LABEL>)-[:IN]->(subject)
+FAMILY_OWNS = "OWNS"
+FAMILY_CONTROLS = "CONTROLS"
+FAMILY_MANAGES = "MANAGES"
+FAMILY_IS_PARTY_TO = "IS_PARTY_TO"
+FAMILY_OTHER = "HAS_OTHER_INTEREST"
+
+FAMILY_REL_TYPES = [
+    FAMILY_OWNS,
+    FAMILY_CONTROLS,
+    FAMILY_MANAGES,
+    FAMILY_IS_PARTY_TO,
+    FAMILY_OTHER,
+]
+
+FAMILY_LABELS = {
+    FAMILY_OWNS: "Ownership",
+    FAMILY_CONTROLS: "Control",
+    FAMILY_MANAGES: "Management",
+    FAMILY_IS_PARTY_TO: "Arrangement",
+    FAMILY_OTHER: "Other",
+}
+
+BODS_INTEREST_TO_FAMILY = {
+    # Ownership family
+    "shareholding": FAMILY_OWNS,
+    "rightsToProfitOrIncome": FAMILY_OWNS,
+    "rightsToSurplusAssetsOnDissolution": FAMILY_OWNS,
+    "rightToProfitOrIncomeFromAssets": FAMILY_OWNS,
+    "enjoymentAndUseOfAssets": FAMILY_OWNS,
+    "rightsGrantedByContract": FAMILY_OWNS,
+    "conditionalRightsGrantedByContract": FAMILY_OWNS,
+    # Control family
+    "votingRights": FAMILY_CONTROLS,
+    "controlViaCompanyRulesOrArticles": FAMILY_CONTROLS,
+    "controlByLegalFramework": FAMILY_CONTROLS,
+    "otherInfluenceOrControl": FAMILY_CONTROLS,
+    "appointmentOfBoard": FAMILY_CONTROLS,
+    # Management family
+    "seniorManagingOfficial": FAMILY_MANAGES,
+    "boardMember": FAMILY_MANAGES,
+    "boardChair": FAMILY_MANAGES,
+    # Arrangement / nominee family
+    "settlor": FAMILY_IS_PARTY_TO,
+    "trustee": FAMILY_IS_PARTY_TO,
+    "protector": FAMILY_IS_PARTY_TO,
+    "beneficiaryOfLegalArrangement": FAMILY_IS_PARTY_TO,
+    "nominee": FAMILY_IS_PARTY_TO,
+    "nominator": FAMILY_IS_PARTY_TO,
+    # Other / unknown
+    "unknownInterest": FAMILY_OTHER,
+    "unpublishedInterest": FAMILY_OTHER,
+}
+
+# Used by graph_queries for variable-length UBO traversal (the ownership /
+# control subset; management & arrangement edges aren't typically counted as
+# beneficial-ownership chains).
+OWNERSHIP_CONTROL_REL_TYPES = [FAMILY_OWNS, FAMILY_CONTROLS]
+
+
+def interest_family(bods_interest_type: str) -> str:
+    """Resolve a BODS interestType string to its Cypher relationship type.
+
+    Unknown / forward-compat interest types fall into HAS_OTHER_INTEREST so
+    they still round-trip and remain discoverable via `:Interest:Other` lookups.
+    """
+    return BODS_INTEREST_TO_FAMILY.get(bods_interest_type, FAMILY_OTHER)
+
 
 def get_record_type(statement: dict) -> str:
     """Extract record type from a BODS statement."""
@@ -154,7 +228,6 @@ def extract_primary_name(record_details: dict, record_type: str) -> str:
     elif record_type == RECORD_TYPE_PERSON:
         names = record_details.get("names", [])
         if names:
-            # Prefer fullName, then construct from parts
             first_name = names[0]
             if first_name.get("fullName"):
                 return first_name["fullName"]

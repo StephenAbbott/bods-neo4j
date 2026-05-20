@@ -1,4 +1,4 @@
-"""Tests for CSV exporter."""
+"""Tests for the graph-native CSV exporter."""
 
 import csv
 import os
@@ -13,99 +13,84 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_FILE = FIXTURES_DIR / "sample_bods.json"
 
 
+@pytest.fixture
+def export_dir():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield Path(tmpdir)
+
+
+def _rows(path: Path):
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 class TestCsvExport:
-    """Tests for CSV export functionality."""
-
-    @pytest.fixture
-    def export_dir(self):
-        """Create a temporary directory for export output."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            yield tmpdir
-
-    def test_export_creates_files(self, export_dir):
-        """Export creates all expected output files."""
+    def test_export_creates_node_csvs(self, export_dir):
         export_to_csv(SAMPLE_FILE, export_dir)
+        for fname in ("entity.csv", "person.csv", "identifier.csv", "country.csv"):
+            assert (export_dir / fname).exists(), f"missing {fname}"
+        # No reified :Interest node CSV.
+        assert not (export_dir / "interest.csv").exists()
 
-        expected_files = [
-            "entities.csv",
-            "persons.csv",
-            "relationships.csv",
-            "import.cypher",
-            "import.sh",
-            "post_import_indexes.cypher",
-        ]
-        for filename in expected_files:
-            assert (Path(export_dir) / filename).exists(), f"Missing: {filename}"
+    def test_export_creates_edge_csvs(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        # 3 relationship statements, all shareholding interests → OWNS edges
+        assert (export_dir / "owns.csv").exists()
+        # No :IN edge — typed edges go directly party→subject.
+        assert not (export_dir / "in.csv").exists()
+        assert (export_dir / "has_identifier.csv").exists()
+        assert (export_dir / "has_address.csv").exists()
+        assert (export_dir / "registered_in.csv").exists()
+
+    def test_export_writes_script_files(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        assert (export_dir / "import.cypher").exists()
+        assert (export_dir / "import.sh").exists()
+        assert os.access(export_dir / "import.sh", os.X_OK)
 
     def test_export_counts(self, export_dir):
-        """Export returns correct counts."""
         counts = export_to_csv(SAMPLE_FILE, export_dir)
+        assert counts["entity_statements"] == 3
+        assert counts["person_statements"] == 2
+        assert counts["relationship_statements"] == 3
+        # Three OWNS edges (3 relationship statements, each carrying one
+        # shareholding interest).
+        assert counts["edges"].get("OWNS") == 3
+        assert "IN" not in counts["edges"]
 
-        assert counts["entities"] == 3
-        assert counts["persons"] == 2
-        assert counts["relationships"] == 3
-        assert counts["skipped"] == 0
-
-    def test_entities_csv_content(self, export_dir):
-        """Entities CSV contains correct data."""
+    def test_entity_csv_has_expected_columns(self, export_dir):
         export_to_csv(SAMPLE_FILE, export_dir)
-
-        with open(Path(export_dir) / "entities.csv", newline="") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
+        rows = _rows(export_dir / "entity.csv")
         assert len(rows) == 3
+        # No legacy `_json` columns
+        for row in rows:
+            for col in row.keys():
+                assert not col.endswith("_json") or col == "extrasJson", (
+                    f"unexpected legacy column {col}"
+                )
 
-        # Check first entity (Alpha Corp)
-        alpha = next(r for r in rows if r["name"] == "Alpha Corp")
-        assert alpha["recordId"] == "rec-entity-alpha"
-        assert alpha["entityType"] == "registeredEntity"
-        assert alpha["jurisdictionCode"] == "GB"
-        assert alpha["foundingDate"] == "2020-01-01"
-
-    def test_persons_csv_content(self, export_dir):
-        """Persons CSV contains correct data."""
+    def test_person_csv_carries_inline_nationalities(self, export_dir):
         export_to_csv(SAMPLE_FILE, export_dir)
+        rows = _rows(export_dir / "person.csv")
+        alice = next(r for r in rows if r["recordId"] == "rec-person-alice")
+        # JSON-encoded list in the CSV cell.
+        assert '"GB"' in alice["nationalityCodes"]
 
-        with open(Path(export_dir) / "persons.csv", newline="") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        assert len(rows) == 2
-
-        alice = next(r for r in rows if r["name"] == "Alice Johnson")
-        assert alice["recordId"] == "rec-person-alice"
-        assert alice["personType"] == "knownPerson"
-        assert alice["familyName"] == "Johnson"
-        assert alice["birthDate"] == "1980-03"
-
-    def test_relationships_csv_content(self, export_dir):
-        """Relationships CSV contains correct data."""
+    def test_owns_csv_links_party_directly_to_subject(self, export_dir):
         export_to_csv(SAMPLE_FILE, export_dir)
+        rows = _rows(export_dir / "owns.csv")
+        alice_owns = [r for r in rows if r["start_key"] == "rec-person-alice"]
+        assert len(alice_owns) == 1
+        # end_key points directly at the subject entity
+        assert alice_owns[0]["end_key"] == "rec-entity-alpha"
+        # Edge carries the interest payload inline
+        assert alice_owns[0]["bodsInterestType"] == "shareholding"
 
-        with open(Path(export_dir) / "relationships.csv", newline="") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-
-        assert len(rows) == 3
-
-        alice_rel = next(r for r in rows if r["sourceRecordId"] == "rec-person-alice")
-        assert alice_rel["targetRecordId"] == "rec-entity-alpha"
-        assert alice_rel["recordId"] == "rec-rel-alice-alpha"
-
-    def test_import_script_executable(self, export_dir):
-        """Import shell script should be executable."""
+    def test_import_script_contains_new_constraints(self, export_dir):
         export_to_csv(SAMPLE_FILE, export_dir)
-        script_path = Path(export_dir) / "import.sh"
-        assert os.access(script_path, os.X_OK)
-
-    def test_cypher_script_contains_constraints(self, export_dir):
-        """Cypher script includes constraint creation."""
-        export_to_csv(SAMPLE_FILE, export_dir)
-        script = (Path(export_dir) / "import.cypher").read_text()
-
-        assert "CREATE CONSTRAINT" in script
-        assert "constraint_entity_record_id" in script
-        assert "constraint_person_record_id" in script
-        assert "LOAD CSV" in script
-        assert "HAS_INTEREST" in script
+        script = (export_dir / "import.cypher").read_text()
+        assert "constraint_identifier_uid" in script
+        assert "constraint_country_code" in script
+        # No legacy HAS_INTEREST or Interest constraint.
+        assert "HAS_INTEREST" not in script
+        assert "constraint_interest_id" not in script

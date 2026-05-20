@@ -1,4 +1,4 @@
-"""Tests for BODS to Neo4j mapper."""
+"""Tests for the forward BODS -> Neo4j mapper (graph-native shape)."""
 
 import json
 from pathlib import Path
@@ -12,233 +12,272 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_FILE = FIXTURES_DIR / "sample_bods.json"
 
 
+def _nodes_by_label(graph, label):
+    return [n for n in graph["nodes"] if label in n["labels"]]
+
+
+def _edges_by_type(graph, rel_type):
+    return [e for e in graph["edges"] if e["rel_type"] == rel_type]
+
+
+def _primary(graph):
+    """Return the primary node spec — the first node in the graph's node list."""
+    return graph["nodes"][0]
+
+
 @pytest.fixture
 def all_statements():
-    """Load all test statements."""
     return list(read_bods_file(SAMPLE_FILE))
 
 
 @pytest.fixture
 def entity_statements(all_statements):
-    """Filter to entity statements only."""
     return [s for s in all_statements if s["recordType"] == "entity"]
 
 
 @pytest.fixture
 def person_statements(all_statements):
-    """Filter to person statements only."""
     return [s for s in all_statements if s["recordType"] == "person"]
 
 
 @pytest.fixture
 def relationship_statements(all_statements):
-    """Filter to relationship statements only."""
     return [s for s in all_statements if s["recordType"] == "relationship"]
 
 
 class TestMapEntityStatement:
-    """Tests for entity statement mapping."""
+    def test_emits_entity_node_with_subtype_labels(self, entity_statements):
+        graph = map_statement(entity_statements[0])  # Alpha Corp
+        assert graph["statement_type"] == "entity"
+        entity_nodes = _nodes_by_label(graph, "Entity")
+        assert len(entity_nodes) == 1
+        assert "RegisteredEntity" in entity_nodes[0]["labels"]
 
-    def test_basic_entity_mapping(self, entity_statements):
-        """Entity statement maps to a node with Entity label."""
-        statement = entity_statements[0]  # Alpha Corp
-        result = map_statement(statement)
-
-        assert result is not None
-        assert result["type"] == "node"
-        assert "Entity" in result["labels"]
-        assert "RegisteredEntity" in result["labels"]
-
-    def test_entity_properties(self, entity_statements):
-        """Entity properties are correctly mapped."""
-        statement = entity_statements[0]  # Alpha Corp
-        result = map_statement(statement)
-        props = result["properties"]
-
+    def test_entity_scalar_properties(self, entity_statements):
+        graph = map_statement(entity_statements[0])
+        props = _primary(graph)["properties"]
         assert props["statementId"] == "test-entity-001"
         assert props["recordId"] == "rec-entity-alpha"
-        assert props["recordType"] == "entity"
         assert props["name"] == "Alpha Corp"
         assert props["entityType"] == "registeredEntity"
-        assert props["jurisdictionCode"] == "GB"
-        assert props["jurisdictionName"] == "United Kingdom"
         assert props["foundingDate"] == "2020-01-01"
 
-    def test_entity_identifiers(self, entity_statements):
-        """Entity identifiers are preserved as JSON and primary fields."""
-        statement = entity_statements[0]  # Alpha Corp
-        result = map_statement(statement)
-        props = result["properties"]
+    def test_jurisdiction_becomes_country_node_and_edge(self, entity_statements):
+        graph = map_statement(entity_statements[0])
+        countries = _nodes_by_label(graph, "Country")
+        assert any(c["key_value"] == "GB" for c in countries)
+        reg = _edges_by_type(graph, "REGISTERED_IN")
+        assert len(reg) == 1
+        assert reg[0]["end_key_value"] == "GB"
 
-        assert props["primaryIdentifierId"] == "00112233"
-        assert props["primaryIdentifierScheme"] == "GB-COH"
-        assert "identifiers_json" in props
-        identifiers = json.loads(props["identifiers_json"])
-        assert len(identifiers) == 1
-        assert identifiers[0]["scheme"] == "GB-COH"
+    def test_identifiers_extracted_as_nodes(self, entity_statements):
+        graph = map_statement(entity_statements[0])
+        idents = _nodes_by_label(graph, "Identifier")
+        assert len(idents) == 1
+        assert idents[0]["properties"]["scheme"] == "GB-COH"
+        assert idents[0]["properties"]["id"] == "00112233"
+        # And a HAS_IDENTIFIER edge from Entity to Identifier.
+        has_ident = _edges_by_type(graph, "HAS_IDENTIFIER")
+        assert len(has_ident) == 1
+        assert has_ident[0]["properties"]["isPrimary"] is True
 
-    def test_entity_addresses(self, entity_statements):
-        """Entity addresses are preserved as JSON and summary fields."""
-        statement = entity_statements[0]  # Alpha Corp
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert props["registeredAddress"] == "1 Test St, London"
-        assert props["registeredPostCode"] == "SW1A 1AA"
-        assert props["registeredCountry"] == "GB"
-        assert "addresses_json" in props
+    def test_addresses_become_address_nodes(self, entity_statements):
+        graph = map_statement(entity_statements[0])  # Alpha Corp has 1 registered address
+        addrs = _nodes_by_label(graph, "Address")
+        assert len(addrs) == 1
+        assert addrs[0]["properties"]["address"] == "1 Test St, London"
+        assert addrs[0]["properties"]["postCode"] == "SW1A 1AA"
+        # HAS_ADDRESS edge carries the BODS address type and ordinal
+        has_addr = _edges_by_type(graph, "HAS_ADDRESS")
+        assert has_addr[0]["properties"]["type"] == "registered"
 
     def test_trust_entity_labels(self, entity_statements):
-        """Trust entity gets Arrangement and Trust labels."""
-        statement = entity_statements[2]  # The Alpha Family Trust
-        result = map_statement(statement)
+        graph = map_statement(entity_statements[2])  # Alpha Family Trust
+        labels = set(_primary(graph)["labels"])
+        assert {"Entity", "Arrangement", "Trust"}.issubset(labels)
 
-        assert "Entity" in result["labels"]
-        assert "Arrangement" in result["labels"]
-        assert "Trust" in result["labels"]
+    def test_no_legacy_json_properties(self, entity_statements):
+        """No `*_json` blob properties should appear on the primary entity
+        node — they are replaced by separate Identifier/Address/Country nodes."""
+        graph = map_statement(entity_statements[0])
+        props = _primary(graph)["properties"]
+        for key in props:
+            assert not key.endswith("_json"), (
+                f"Legacy JSON property leaked onto Entity: {key}"
+            )
 
-    def test_entity_publication_details(self, entity_statements):
-        """Publication details are preserved."""
-        statement = entity_statements[0]
-        result = map_statement(statement)
-        props = result["properties"]
-
+    def test_publication_details_stay_inline(self, entity_statements):
+        graph = map_statement(entity_statements[0])
+        props = _primary(graph)["properties"]
         assert props["publisherName"] == "Test Publisher"
         assert props["publicationDate"] == "2024-01-15"
         assert props["bodsVersion"] == "0.4"
 
-    def test_empty_strings_removed(self, entity_statements):
-        """Empty string values are not included in properties."""
-        statement = entity_statements[1]  # Beta Holdings (no address)
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert "registeredAddress" not in props
-        assert "dissolutionDate" not in props
-
 
 class TestMapPersonStatement:
-    """Tests for person statement mapping."""
+    def test_emits_person_node(self, person_statements):
+        graph = map_statement(person_statements[0])
+        assert graph["statement_type"] == "person"
+        assert _primary(graph)["labels"] == ["Person"]
 
-    def test_basic_person_mapping(self, person_statements):
-        """Person statement maps to a node with Person label."""
-        statement = person_statements[0]  # Alice Johnson
-        result = map_statement(statement)
-
-        assert result is not None
-        assert result["type"] == "node"
-        assert result["labels"] == ["Person"]
-
-    def test_person_properties(self, person_statements):
-        """Person properties are correctly mapped."""
-        statement = person_statements[0]  # Alice Johnson
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert props["statementId"] == "test-person-001"
+    def test_person_scalar_properties(self, person_statements):
+        graph = map_statement(person_statements[0])
+        props = _primary(graph)["properties"]
         assert props["recordId"] == "rec-person-alice"
-        assert props["recordType"] == "person"
-        assert props["name"] == "Alice Johnson"
         assert props["personType"] == "knownPerson"
         assert props["givenName"] == "Alice"
         assert props["familyName"] == "Johnson"
         assert props["birthDate"] == "1980-03"
-        assert props["nationalityCode"] == "GB"
 
-    def test_person_names_json(self, person_statements):
-        """Person names array is preserved as JSON."""
-        statement = person_statements[0]  # Alice Johnson
-        result = map_statement(statement)
-        props = result["properties"]
+    def test_nationalities_become_inline_parallel_lists(self, person_statements):
+        graph = map_statement(person_statements[0])
+        props = _primary(graph)["properties"]
+        assert props["nationalityCodes"] == ["GB"]
+        assert props["nationalityNames"] == ["United Kingdom"]
 
-        assert "names_json" in props
-        names = json.loads(props["names_json"])
-        assert len(names) == 1
-        assert names[0]["fullName"] == "Alice Johnson"
-        assert names[0]["type"] == "legal"
+    def test_address_emitted_for_person_with_residence(self, person_statements):
+        graph = map_statement(person_statements[0])  # Alice has a residence address
+        addrs = _nodes_by_label(graph, "Address")
+        assert len(addrs) == 1
+        has_addr = _edges_by_type(graph, "HAS_ADDRESS")
+        assert has_addr[0]["properties"]["type"] == "residence"
 
 
 class TestMapRelationshipStatement:
-    """Tests for relationship statement mapping."""
+    def test_emits_typed_edge_for_single_interest(self, relationship_statements):
+        # test-rel-001 has 1 interest (shareholding)
+        graph = map_statement(relationship_statements[0])
+        assert graph["statement_type"] == "relationship"
+        owns = _edges_by_type(graph, "OWNS")
+        assert len(owns) == 1
+        e = owns[0]
+        assert e["start_key_value"] == "rec-person-alice"
+        assert e["end_key_value"] == "rec-entity-alpha"
+        assert e["properties"]["bodsInterestType"] == "shareholding"
+        assert e["properties"]["family"] == "OWNS"
 
-    def test_basic_relationship_mapping(self, relationship_statements):
-        """Relationship statement maps to a relationship dict."""
-        statement = relationship_statements[0]  # Alice -> Alpha Corp
-        result = map_statement(statement)
-
-        assert result is not None
-        assert result["type"] == "relationship"
-        assert result["rel_type"] == "HAS_INTEREST"
-
-    def test_relationship_endpoints(self, relationship_statements):
-        """Relationship source and target are correctly mapped."""
-        statement = relationship_statements[0]  # Alice -> Alpha Corp
-        result = map_statement(statement)
-
-        assert result["source_record_id"] == "rec-person-alice"
-        assert result["target_record_id"] == "rec-entity-alpha"
-
-    def test_relationship_properties(self, relationship_statements):
-        """Relationship properties include interest details."""
-        statement = relationship_statements[0]  # Alice -> Alpha Corp
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert props["statementId"] == "test-rel-001"
-        assert props["recordId"] == "rec-rel-alice-alpha"
-        assert props["isBeneficialOwnership"] is True
-        assert props["directOrIndirect"] == "direct"
-        assert props["shareMinimum"] == 50
-        assert props["shareMaximum"] == 75
-        assert props["interestStartDate"] == "2020-01-01"
-
-    def test_relationship_interest_types(self, relationship_statements):
-        """Interest types are extracted as a list."""
-        statement = relationship_statements[0]  # Alice -> Alpha Corp
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert "shareholding" in props["interestTypes"]
-
-    def test_relationship_interests_json(self, relationship_statements):
-        """Full interests array is preserved as JSON."""
-        statement = relationship_statements[0]
-        result = map_statement(statement)
-        props = result["properties"]
-
-        assert "interests_json" in props
-        interests = json.loads(props["interests_json"])
-        assert len(interests) == 1
-        assert interests[0]["type"] == "shareholding"
-
-    def test_entity_to_entity_relationship(self, relationship_statements):
-        """Entity-to-entity ownership is correctly mapped."""
-        statement = relationship_statements[1]  # Beta -> Alpha
-        result = map_statement(statement)
-
-        assert result["source_record_id"] == "rec-entity-beta"
-        assert result["target_record_id"] == "rec-entity-alpha"
+    def test_share_extracted_to_edge_properties(self, relationship_statements):
+        graph = map_statement(relationship_statements[0])
+        e = _edges_by_type(graph, "OWNS")[0]
+        assert e["properties"]["shareMinimum"] == 50.0
+        assert e["properties"]["shareMaximum"] == 75.0
+        assert e["properties"]["directOrIndirect"] == "direct"
+        assert e["properties"]["beneficialOwnershipOrControl"] is True
 
     def test_exact_share(self, relationship_statements):
-        """Exact share values are captured."""
-        statement = relationship_statements[2]  # Bob -> Beta (100%)
-        result = map_statement(statement)
-        props = result["properties"]
+        graph = map_statement(relationship_statements[2])  # Bob -> Beta, exact: 100
+        e = _edges_by_type(graph, "OWNS")[0]
+        assert e["properties"]["shareExact"] == 100.0
 
-        assert props["shareExact"] == 100
+    def test_envelope_carries_endpoint_record_ids(self, relationship_statements):
+        graph = map_statement(relationship_statements[0])
+        assert graph["interested_party_record_id"] == "rec-person-alice"
+        assert graph["subject_record_id"] == "rec-entity-alpha"
+
+    def test_no_interest_nodes_emitted(self, relationship_statements):
+        """Interests are carried on edges; no :Interest nodes should exist."""
+        graph = map_statement(relationship_statements[0])
+        interest_nodes = _nodes_by_label(graph, "Interest")
+        assert interest_nodes == []
+
+
+class TestDetailsCategoryValueParsing:
+    """The forward mapper splits structured `"<Category>: <Value>"` strings
+    in the interest `details` field into `detailsCategory` / `detailsValue`
+    properties on the edge. Producer-agnostic — fires on any BODS source
+    that follows the convention (GLEIF, UK PSC, ...). The original
+    `details` string stays intact so the round-trip is lossless."""
+
+    def _stmt_with_interest(self, **interest):
+        return {
+            "statementId": "s1",
+            "recordId": "rec-rel",
+            "recordType": "relationship",
+            "recordDetails": {
+                "subject": "rec-target",
+                "interestedParty": "rec-party",
+                "interests": [interest],
+            },
+        }
+
+    def test_relationship_type_parsed(self):
+        stmt = self._stmt_with_interest(
+            type="otherInfluenceOrControl",
+            details="Relationship Type: IS_ULTIMATELY_CONSOLIDATED_BY",
+        )
+        e = map_statement(stmt)["edges"][0]
+        assert e["properties"]["details"] == "Relationship Type: IS_ULTIMATELY_CONSOLIDATED_BY"
+        assert e["properties"]["detailsCategory"] == "Relationship Type"
+        assert e["properties"]["detailsValue"] == "IS_ULTIMATELY_CONSOLIDATED_BY"
+
+    def test_exception_category_parsed(self):
+        stmt = self._stmt_with_interest(
+            type="otherInfluenceOrControl",
+            details="Exception Category: ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT",
+        )
+        e = map_statement(stmt)["edges"][0]
+        assert e["properties"]["detailsCategory"] == "Exception Category"
+        assert e["properties"]["detailsValue"] == "ULTIMATE_ACCOUNTING_CONSOLIDATION_PARENT"
+
+    def test_uk_psc_relationship_type_also_parses(self):
+        # UK PSC uses the same convention with a different value vocabulary
+        stmt = self._stmt_with_interest(
+            type="otherInfluenceOrControl",
+            details="Relationship Type: persons-with-significant-control-statement",
+        )
+        e = map_statement(stmt)["edges"][0]
+        assert e["properties"]["detailsCategory"] == "Relationship Type"
+        assert e["properties"]["detailsValue"] == "persons-with-significant-control-statement"
+
+    def test_unrecognised_details_is_left_intact(self):
+        stmt = self._stmt_with_interest(
+            type="otherInfluenceOrControl",
+            details="some free-form text the producer chose",
+        )
+        e = map_statement(stmt)["edges"][0]
+        assert e["properties"]["details"] == "some free-form text the producer chose"
+        assert "detailsCategory" not in e["properties"]
+        assert "detailsValue" not in e["properties"]
+
+    def test_lowercase_prefix_not_parsed(self):
+        # Free-form prose with a colon shouldn't be treated as structured.
+        stmt = self._stmt_with_interest(
+            type="otherInfluenceOrControl",
+            details="note: held since 2019",
+        )
+        e = map_statement(stmt)["edges"][0]
+        assert "detailsCategory" not in e["properties"]
+        assert "detailsValue" not in e["properties"]
+
+
+class TestMultiInterestRelationship:
+    """Sample data has stmt-rel-001 with 2 interests (shareholding + votingRights)."""
+
+    def test_two_interests_become_two_typed_edges(self):
+        sample = Path(__file__).parent.parent / "examples" / "sample_data" / "sample_bods.json"
+        if not sample.exists():
+            pytest.skip("examples/sample_data/sample_bods.json not present")
+        statements = list(read_bods_file(sample))
+        rel = next(s for s in statements if s["statementId"] == "stmt-rel-001")
+        graph = map_statement(rel)
+        # Two edges from Jane to Acme, one OWNS (shareholding) + one CONTROLS (votingRights)
+        edges_from_jane = [
+            e for e in graph["edges"]
+            if e["start_key_value"] == "rec-person-jane"
+        ]
+        assert len(edges_from_jane) == 2
+        rel_types = {e["rel_type"] for e in edges_from_jane}
+        assert rel_types == {"OWNS", "CONTROLS"}
+        types_on_edges = {e["properties"]["bodsInterestType"] for e in edges_from_jane}
+        assert types_on_edges == {"shareholding", "votingRights"}
+        # Both edges share the same statementId
+        sids = {e["properties"]["statementId"] for e in edges_from_jane}
+        assert sids == {"stmt-rel-001"}
 
 
 class TestMapUnknownStatement:
-    """Tests for edge cases."""
-
     def test_unknown_record_type(self):
-        """Unknown record type returns None."""
-        statement = {"recordType": "unknown", "statementId": "test"}
-        result = map_statement(statement)
-        assert result is None
+        assert map_statement({"recordType": "unknown", "statementId": "x"}) is None
 
     def test_missing_record_type(self):
-        """Missing record type returns None."""
-        statement = {"statementId": "test"}
-        result = map_statement(statement)
-        assert result is None
+        assert map_statement({"statementId": "x"}) is None

@@ -46,8 +46,12 @@ class ExportConfig:
     mode: str = "csv"
     # Output directory for CSV export
     output_dir: str = "./neo4j_export"
-    # Batch size for driver-based loading
+    # Batch size for driver-based loading (per UNWIND call to Neo4j)
     batch_size: int = 5000
+    # Memory-bounded streaming: flush in-memory accumulators when they
+    # reach this many spec entries. Larger = more cross-statement dedup
+    # before write but more RAM. Defaults to 10× batch_size when unset.
+    streaming_chunk_size: int = 50000
     # Whether to create constraints and indexes
     create_schema: bool = True
     # Whether to clear existing data before import
@@ -59,3 +63,8 @@ class ExportConfig:
     interest_rel_type: str = "HAS_INTEREST"
     # Whether to add entity subtype as additional label
     use_subtype_labels: bool = True
+    # After loading, mark the most-recent statement per relationship
+    # recordId with isLatestVersion=true. Lets graph queries filter to
+    # current state cheaply (`WHERE r.isLatestVersion`) without
+    # discarding the historic statements.
+    stamp_latest_versions: bool = True
