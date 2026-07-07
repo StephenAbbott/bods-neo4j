@@ -180,15 +180,22 @@ def _write_csv(path: Path, columns: list, rows: list) -> None:
 
 def _flatten_for_csv(props: dict) -> dict:
     """Lists become JSON-encoded strings so CSV stays single-valued per cell.
-    Cypher's LOAD CSV step parses these back via apoc.convert.fromJsonList()."""
+    Cypher's LOAD CSV step parses these back via apoc.convert.fromJsonList().
+
+    String values have backslashes doubled so that Neo4j's default legacy
+    quote escaping (``dbms.import.csv.legacy_quote_escaping=true``) does not
+    misinterpret ``\\"`` sequences as escaped quotes.
+    """
     out = {}
     for k, v in props.items():
         if isinstance(v, list):
-            out[k] = json.dumps(v, ensure_ascii=False)
+            out[k] = json.dumps(v, ensure_ascii=False).replace("\\", "\\\\")
         elif isinstance(v, bool):
             out[k] = "true" if v else "false"
         elif v is None:
             out[k] = ""
+        elif isinstance(v, str) and "\\" in v:
+            out[k] = v.replace("\\", "\\\\")
         else:
             out[k] = v
     return out
@@ -274,6 +281,13 @@ def _generate_import_sh(output_dir: Path) -> None:
     script = """#!/bin/bash
 # Run the import.cypher script via cypher-shell against a running Neo4j instance.
 # Place the CSV files in Neo4j's import directory (or serve them via HTTP) first.
+#
+# NOTE: If your Neo4j instance uses the default legacy CSV quote escaping
+# (dbms.import.csv.legacy_quote_escaping=true), start it with:
+#   NEO4J_dbms_import_csv_legacy__quote__escaping=false
+# or set the option in neo4j.conf.  The CSV files produced by bods-neo4j use
+# standard RFC-4180 escaping (doubled quotes); legacy backslash escaping can
+# misparse cells that contain literal backslashes.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cypher-shell "${@}" < "${DIR}/import.cypher"

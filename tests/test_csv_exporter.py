@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from bods_neo4j.bods_to_neo4j.csv_exporter import export_to_csv
+from bods_neo4j.bods_to_neo4j.csv_exporter import _flatten_for_csv, export_to_csv
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 SAMPLE_FILE = FIXTURES_DIR / "sample_bods.json"
@@ -94,3 +94,30 @@ class TestCsvExport:
         # No legacy HAS_INTEREST or Interest constraint.
         assert "HAS_INTEREST" not in script
         assert "constraint_interest_id" not in script
+
+
+class TestBackslashEscaping:
+    """Backslashes in CSV cells must be doubled so Neo4j's default legacy
+    quote escaping does not misinterpret backslash-quote as an escape."""
+
+    def test_backslash_in_string_value_is_doubled(self):
+        result = _flatten_for_csv({"name": 'Puppet \\"Investment\\"'})
+        assert result["name"] == 'Puppet \\\\"Investment\\\\"'
+
+    def test_backslashes_in_json_list_are_doubled(self):
+        result = _flatten_for_csv({"alt": ['"\\"ТОО"']})
+        assert "\\\\" in result["alt"]
+
+    def test_plain_string_without_backslash_unchanged(self):
+        result = _flatten_for_csv({"name": "Alpha Corp"})
+        assert result["name"] == "Alpha Corp"
+
+    def test_bool_and_none_unaffected(self):
+        result = _flatten_for_csv({"flag": True, "empty": None})
+        assert result["flag"] == "true"
+        assert result["empty"] == ""
+
+    def test_import_sh_documents_legacy_escaping(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.sh").read_text()
+        assert "legacy_quote_escaping" in script
