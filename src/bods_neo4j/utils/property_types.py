@@ -62,6 +62,14 @@ DATE_PROPS = frozenset({
     "formedByStatuteDate",
 })
 
+# List properties the CSV route writes as one cell joined by an ASCII unit
+# separator and loads back with split(), so they arrive as native lists
+# without APOC. (Other lists stay JSON-encoded strings in the CSV route.)
+SPLIT_LIST_PROPS = frozenset({
+    "identifiers",
+})
+LIST_SEPARATOR = "\x1f"
+
 _FULL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Same check inside Cypher (Java regex, whole-string match).
 _CYPHER_FULL_DATE_RE = r"\\d{4}-\\d{2}-\\d{2}"
@@ -103,6 +111,8 @@ def cypher_cast(key: str, var: str = "row") -> str:
             f"CASE WHEN toLower({col}) IN ['true', 'false'] "
             f"THEN toBoolean({col}) ELSE toFloat({col}) END"
         )
+    if key in SPLIT_LIST_PROPS:
+        return f"CASE WHEN {col} IS NULL THEN null ELSE split({col}, '\\u001F') END"
     if key in DATE_PROPS:
         return (
             f"CASE WHEN {col} =~ '{_CYPHER_FULL_DATE_RE}' "

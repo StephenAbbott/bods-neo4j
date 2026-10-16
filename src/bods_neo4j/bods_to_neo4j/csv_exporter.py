@@ -31,8 +31,8 @@ from typing import Iterable, Union
 
 from ..utils.bods_schema import FAMILY_REL_TYPES
 from ..utils.dedup import is_loser, scan_for_dedup
-from ..utils.property_types import cypher_cast
-from .mapper import map_statement
+from ..utils.property_types import LIST_SEPARATOR, SPLIT_LIST_PROPS, cypher_cast
+from .mapper import add_identifiers_property, map_statement
 from .reader import read_bods_file
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,12 @@ _LABEL_TO_FILENAME = {
 def export_to_csv(
     bods_file: Union[str, Path],
     output_dir: Union[str, Path] = "./neo4j_export",
+    identifiers_property: bool = False,
 ) -> dict:
     """Export BODS data to per-label / per-rel-type CSV files.
+
+    ``identifiers_property`` adds the opt-in denormalised ``identifiers``
+    column to entity.csv / person.csv (see ``mapper.add_identifiers_property``).
 
     Returns counts of statements and total nodes / edges written.
     """
@@ -94,6 +98,8 @@ def export_to_csv(
         if graph is None:
             counts["skipped"] += 1
             continue
+        if identifiers_property:
+            add_identifiers_property(graph)
         statement_type = graph["statement_type"]
         counts[f"{statement_type}_statements"] += 1
 
@@ -194,7 +200,10 @@ def _flatten_for_csv(props: dict) -> dict:
     """
     out = {}
     for k, v in props.items():
-        if isinstance(v, list):
+        if k in SPLIT_LIST_PROPS and isinstance(v, list):
+            # Loaded back as a native list with split() — no APOC needed.
+            out[k] = LIST_SEPARATOR.join(str(x) for x in v).replace("\\", "\\\\")
+        elif isinstance(v, list):
             out[k] = json.dumps(v, ensure_ascii=False).replace("\\", "\\\\")
         elif isinstance(v, bool):
             out[k] = "true" if v else "false"

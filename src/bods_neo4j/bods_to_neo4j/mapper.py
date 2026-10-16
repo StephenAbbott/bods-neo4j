@@ -923,6 +923,59 @@ def _extras_residual(statement_extras: dict, details_extras: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def identifier_token(scheme: Optional[str], ident_id: Optional[str]) -> Optional[str]:
+    """``scheme:id`` with the scheme lowercased and the id exactly as published.
+
+    ``None`` when either part is missing: a bare id with no scheme cannot be
+    told apart from the same digits on another register, so it is never
+    offered as a match key.
+    """
+    scheme = (scheme or "").strip()
+    ident_id = (ident_id or "").strip()
+    if not scheme or not ident_id:
+        return None
+    return f"{scheme.lower()}:{ident_id}"
+
+
+def add_identifiers_property(graph: Optional[dict]) -> Optional[dict]:
+    """Opt-in: copy each Entity/Person node's identifiers onto the node itself.
+
+    The graph model keeps identifiers as ``(:Identifier)`` nodes reached by
+    ``HAS_IDENTIFIER``. Tools that score node-local properties only (most
+    generic entity-resolution tooling) cannot see them there, so this adds
+    ``identifiers: ["xi-lei:5493…", "gb-coh:00041424"]`` — in the statement's
+    own order, without duplicates — built from the same ``(:Identifier)``
+    nodes. Nothing else changes, and the Neo4j → BODS export ignores the
+    property (it rebuilds identifiers from the ``(:Identifier)`` nodes).
+    """
+    if not graph:
+        return graph
+    ident_props = {
+        n["key_value"]: n["properties"]
+        for n in graph["nodes"] if n["labels"][0] == "Identifier"
+    }
+    by_parent: dict = {}
+    for e in graph["edges"]:
+        if e["rel_type"] != "HAS_IDENTIFIER":
+            continue
+        props = ident_props.get(e["end_key_value"]) or {}
+        token = identifier_token(
+            props.get("scheme") or props.get("schemeName"), props.get("id"),
+        )
+        if token:
+            by_parent.setdefault(e["start_key_value"], []).append(
+                (e["properties"].get("ordinal", 0), token)
+            )
+    for node in graph["nodes"]:
+        if node["labels"][0] not in ("Entity", "Person"):
+            continue
+        tokens = [t for _, t in sorted(by_parent.get(node["key_value"], []),
+                                       key=lambda x: x[0])]
+        if tokens:
+            node["properties"]["identifiers"] = list(dict.fromkeys(tokens))
+    return graph
+
+
 def _node_spec(labels: list, key_property: str, key_value: str, properties: dict) -> dict:
     return {
         "labels": list(labels),

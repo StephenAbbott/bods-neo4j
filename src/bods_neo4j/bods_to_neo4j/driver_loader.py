@@ -63,7 +63,7 @@ from ..utils.neo4j_helpers import (
     get_database_stats,
 )
 from ..utils.property_types import to_neo4j_value
-from .mapper import map_statement
+from .mapper import add_identifiers_property, map_statement
 from .reader import read_bods_file
 
 logger = logging.getLogger(__name__)
@@ -319,6 +319,8 @@ def load_bods_to_neo4j(
             if graph is None:
                 counts["skipped"] += 1
                 continue
+            if export_config.identifiers_property:
+                add_identifiers_property(graph)
             statement_type = graph["statement_type"]
             counts[f"{statement_type}_statements"] += 1
 

@@ -43,8 +43,11 @@ def main():
 @click.argument("bods_file", type=click.Path(exists=True))
 @click.option("-o", "--output-dir", default="./neo4j_export",
               help="Output directory for CSV files and import scripts")
+@click.option("--identifiers-property", is_flag=True,
+              help="Also write an 'identifiers' array (scheme:id) on Entity/Person "
+                   "nodes, for tools that read node-local properties only")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging")
-def to_csv(bods_file, output_dir, verbose):
+def to_csv(bods_file, output_dir, identifiers_property, verbose):
     """Export BODS data to Neo4j-importable CSV files.
 
     Generates entities.csv, persons.csv, relationships.csv plus
@@ -55,7 +58,8 @@ def to_csv(bods_file, output_dir, verbose):
     _setup_logging(verbose)
     from .bods_to_neo4j.csv_exporter import export_to_csv
 
-    counts = export_to_csv(bods_file, output_dir)
+    counts = export_to_csv(bods_file, output_dir,
+                           identifiers_property=identifiers_property)
 
     click.echo(f"\nExport complete:")
     click.echo(f"  Entity statements:       {counts['entity_statements']:,}")
@@ -89,8 +93,12 @@ def to_csv(bods_file, output_dir, verbose):
 @click.option("--batch-size", default=5000, help="Records per batch transaction")
 @click.option("--clear", is_flag=True, help="Clear existing data before import")
 @click.option("--no-schema", is_flag=True, help="Skip constraint/index creation")
+@click.option("--identifiers-property", is_flag=True,
+              help="Also write an 'identifiers' array (scheme:id) on Entity/Person "
+                   "nodes, for tools that read node-local properties only")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging")
-def to_neo4j(bods_file, uri, username, password, database, batch_size, clear, no_schema, verbose):
+def to_neo4j(bods_file, uri, username, password, database, batch_size, clear, no_schema,
+             identifiers_property, verbose):
     """Load BODS data directly into Neo4j via the Python driver.
 
     Best for datasets up to ~1M statements. For larger datasets,
@@ -108,6 +116,7 @@ def to_neo4j(bods_file, uri, username, password, database, batch_size, clear, no
         batch_size=batch_size,
         clear_existing=clear,
         create_schema=not no_schema,
+        identifiers_property=identifiers_property,
     )
 
     counts = load_bods_to_neo4j(bods_file, neo4j_config, export_config)

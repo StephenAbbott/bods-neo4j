@@ -149,7 +149,46 @@ The 23 BODS interest types collapse into five Cypher relationship-type families 
 
 ### Round-Trip Fidelity
 
-The reverse mapper rebuilds `identifiers` / `addresses` by aggregating their related graph nodes, and rebuilds `interests[]` by grouping typed edges that share a `statementId` and sorting by `interestIndex`. No `*_json` blobs on nodes or edges. Any publisher-specific or forward-compat fields the structured extraction does not recognise are preserved verbatim in a single `extrasJson` catch-all per node / first edge. Data can be converted back to valid BODS v0.4 format without loss.
+The reverse mapper rebuilds `identifiers` / `addresses` by aggregating their related graph nodes, and rebuilds `interests[]` by grouping typed edges that share a `statementId` and sorting by `interestIndex`. No `*_json` blobs on nodes or edges. Any publisher-specific or forward-compat fields the structured extraction does not recognise are preserved verbatim in a single `extrasJson` catch-all per node / first edge. Data can be converted back to valid BODS v0.4 format without loss when it was loaded with `to-neo4j`. The CSV route (`to-csv` + `import.cypher`) still loads list properties such as `sourceTypes` and `nationalityCodes` as JSON-encoded strings, so a graph loaded that way exports without `source.type` and person nationalities.
+
+## Cross-source entity resolution
+
+bods-neo4j removes duplicates only where BODS itself says a statement is superseded (`replacesStatements`, latest statement per `recordId`). It does **not** decide that a company arriving from GLEIF, a national register and OpenCorporates is one company: each source's `recordId` stays its own `:Entity` node. Linking them is entity resolution, and it is a separate step.
+
+### Identifiers on the node (opt-in)
+
+Identifiers are modelled as `(:Identifier)` nodes reached by `HAS_IDENTIFIER`. That is the right graph shape, but most generic entity-resolution tools score only node-local properties, so they cannot see a shared LEI or company number, which is the strongest match signal in ownership data. Pass `--identifiers-property` to `to-csv` or `to-neo4j` (or `ExportConfig(identifiers_property=True)` / `export_to_csv(..., identifiers_property=True)`) to also write them onto each `:Entity` and `:Person` node:
+
+```text
+identifiers: ["xi-lei:5493001KJTIIGC8Y1R12", "gb-coh:00041424"]
+```
+
+Each value is `scheme:id`, with the scheme lowercased and the id exactly as published, in the statement's order and without duplicates. An identifier with no scheme is left out, because a bare number cannot be told apart from the same digits on another register. The `(:Identifier)` nodes are unchanged, and `to-bods` ignores the property. Both routes load it as a native list (the CSV route splits one cell, with no APOC needed). It also makes plain Cypher matching a one-step query:
+
+```cypher
+MATCH (a:Entity), (b:Entity)
+WHERE elementId(a) < elementId(b)
+  AND any(i IN a.identifiers WHERE i IN b.identifiers)
+RETURN a.name, b.name, [i IN a.identifiers WHERE i IN b.identifiers] AS shared;
+```
+
+### Record verdicts; don't merge nodes
+
+Entity-resolution tools usually offer a merge step that folds duplicates into one node and `DETACH DELETE`s the rest, either directly or through `apoc.refactor.mergeNodes`. **Do not run it on a BODS graph.** It destroys `statementId`s, `recordId`s and per-source metadata, so the graph can no longer be exported back to BODS and you can no longer tell which source said what.
+
+Run such tools in annotation mode instead: leave the records alone and write each decision as its own node or relationship next to them, for example
+
+```cypher
+MATCH (a:Entity {recordId: $a}), (b:Entity {recordId: $b})
+MERGE (p:ERPair {a: $a, b: $b})
+SET p.verdict = 'duplicate', p.decidedBy = 'reviewer', p.decidedAt = datetime()
+MERGE (p)-[:INVOLVES]->(a)
+MERGE (p)-[:INVOLVES]->(b);
+```
+
+Queries that want one node per real-world company can then follow `ERPair` verdicts, and anything that needs the source records still has them. `to-bods` does not export verdict layers.
+
+When you point a schema-discovery or matching tool at the graph, leave out labels that are not real-world parties: bods-neo4j's reified `Identifier`, `Address` and `Country` nodes, the `UnspecifiedParty` sentinels, and the tool's own review labels (such as `ERPair`).
 
 ## Graph Analysis Queries
 

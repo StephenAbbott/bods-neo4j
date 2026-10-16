@@ -68,3 +68,7 @@ class ExportConfig:
     # current state cheaply (`WHERE r.isLatestVersion`) without
     # discarding the historic statements.
     stamp_latest_versions: bool = True
+    # Opt-in: also write a denormalised ``identifiers`` string array
+    # ("scheme:id", scheme lowercased) onto Entity and Person nodes, for
+    # tools that only read node-local properties. Off by default.
+    identifiers_property: bool = False

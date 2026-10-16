@@ -163,3 +163,24 @@ class TestTypedImport:
         export_to_csv(SAMPLE_FILE, export_dir)
         script = (export_dir / "import.cypher").read_text()
         assert "n.recordId = row.recordId" not in script
+
+
+class TestIdentifiersProperty:
+    """Issue #3: opt-in denormalised ``identifiers`` on Entity/Person nodes."""
+
+    def test_off_by_default(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        for fname in ("entity.csv", "person.csv"):
+            assert "identifiers" not in _rows(export_dir / fname)[0]
+        assert "row.identifiers" not in (export_dir / "import.cypher").read_text()
+
+    def test_written_as_separated_cell_and_split_on_load(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir, identifiers_property=True)
+        rows = [r for r in _rows(export_dir / "entity.csv") if r.get("identifiers")]
+        assert rows, "sample has entity identifiers"
+        for r in rows:
+            for token in r["identifiers"].split("\x1f"):
+                scheme, _, ident = token.partition(":")
+                assert scheme and ident and scheme == scheme.lower()
+        script = (export_dir / "import.cypher").read_text()
+        assert "split(row.identifiers, '\\u001F')" in script
