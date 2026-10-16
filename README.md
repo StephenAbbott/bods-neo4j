@@ -59,6 +59,21 @@ This produces:
 - One CSV per node label (`entity.csv`, `person.csv`, `identifier.csv`, `address.csv`, `country.csv`, `unspecified_party.csv`)
 - One CSV per relationship type (`owns.csv`, `controls.csv`, `manages.csv`, `is_party_to.csv`, `has_other_interest.csv`, `has_identifier.csv`, `has_address.csv`, `located_in.csv`, `registered_in.csv`, `born_in.csv`)
 - `import.cypher` — `LOAD CSV` script for a running Neo4j instance (includes constraints + entity subtype-label fixups)
+
+`LOAD CSV` reads every cell as a string, so `import.cypher` casts each typed column explicitly rather than using `SET n += row`. Both import routes (CSV and direct driver) produce the same property types:
+
+| Properties | Neo4j type |
+|---|---|
+| `shareExact`, `shareMinimum`, `shareMaximum` | `FLOAT` |
+| `shareExclusiveMin`, `shareExclusiveMax` | `FLOAT` (or `BOOLEAN` where a producer emits a flag) |
+| `isComponent`, `beneficialOwnershipOrControl`, `synthetic`, `isPrimary`, `hasPublicListing` | `BOOLEAN` |
+| `interestIndex`, `ordinal` | `INTEGER` |
+| `statementDate`, `publicationDate`, `startDate`, `endDate`, `foundingDate`, `dissolutionDate`, `formedByStatuteDate` | `DATE` when a full `YYYY-MM-DD`; otherwise kept as the source string |
+| `birthDate`, `deathDate` | `STRING` (BODS allows partial dates such as `1970-06`) |
+
+The type map lives in `src/bods_neo4j/utils/property_types.py`. List properties (`sourceTypes`, `alternateNames`, `nationalityCodes`, …) are still JSON-encoded strings in the CSV route; the driver route stores them as native lists.
+
+UK PSC and similar sources publish share **bands** (e.g. `shareMinimum` 25 / `shareMaximum` 50), not exact figures. Both bounds are kept as numbers; turning a band into one weight is left to each query — use the lower bound for a conservative control test, or the midpoint for centrality weights, and say which you used.
 - `import.sh` — convenience wrapper that pipes `import.cypher` through `cypher-shell`
 
 ### 3. BODS → Neo4j (direct driver load)

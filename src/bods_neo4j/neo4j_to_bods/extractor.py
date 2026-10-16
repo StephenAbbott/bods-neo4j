@@ -12,6 +12,7 @@ from typing import Generator
 from ..config import Neo4jConfig
 from ..utils.bods_schema import FAMILY_REL_TYPES
 from ..utils.neo4j_helpers import neo4j_driver
+from ..utils.property_types import to_plain
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +110,13 @@ def extract_entity_statements(
         )
         count = 0
         for record in result.records:
-            yield {
+            yield to_plain({
                 "node": dict(record["node"]),
                 "labels": list(record["labels"] or []),
                 "jurisdiction": dict(record["jurisdiction"]) if record["jurisdiction"] else None,
                 "identifiers": [dict(x) for x in (record["identifiers"] or [])],
                 "addresses": [dict(x) for x in (record["addresses"] or [])],
-            }
+            })
             count += 1
         logger.info("Extracted %d entity statements", count)
 
@@ -131,13 +132,13 @@ def extract_person_statements(
         )
         count = 0
         for record in result.records:
-            yield {
+            yield to_plain({
                 "node": dict(record["node"]),
                 "labels": list(record["labels"] or []),
                 "identifiers": [dict(x) for x in (record["identifiers"] or [])],
                 "addresses": [dict(x) for x in (record["addresses"] or [])],
                 "place_of_birth": dict(record["placeOfBirth"]) if record["placeOfBirth"] else None,
-            }
+            })
             count += 1
         logger.info("Extracted %d person statements", count)
 
@@ -155,7 +156,7 @@ def extract_relationship_statements(
         for record in result.records:
             edges = [dict(e) for e in (record["edges"] or [])]
             first = edges[0] if edges else {}
-            yield {
+            yield to_plain({
                 "statement_id": record["statementId"],
                 "edges": [dict(e["props"]) for e in edges],
                 "edge_rel_types": [e["relType"] for e in edges],
@@ -171,7 +172,7 @@ def extract_relationship_statements(
                     dict(first["subjectUnspecifiedProps"])
                     if first.get("subjectUnspecifiedProps") else None
                 ),
-            }
+            })
             count += 1
         logger.info("Extracted %d relationship statements", count)
 

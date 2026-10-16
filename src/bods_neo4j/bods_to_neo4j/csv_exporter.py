@@ -31,6 +31,7 @@ from typing import Iterable, Union
 
 from ..utils.bods_schema import FAMILY_REL_TYPES
 from ..utils.dedup import is_loser, scan_for_dedup
+from ..utils.property_types import cypher_cast
 from .mapper import map_statement
 from .reader import read_bods_file
 
@@ -113,9 +114,10 @@ def export_to_csv(
         for edge in graph["edges"]:
             edges_by_type[edge["rel_type"]].append(edge)
 
-    node_totals = _write_node_csvs(output_dir, nodes_by_label)
-    edge_totals = _write_edge_csvs(output_dir, edges_by_type)
-    _generate_import_cypher(output_dir, node_totals, edge_totals)
+    columns: dict[str, list] = {}
+    node_totals = _write_node_csvs(output_dir, nodes_by_label, columns)
+    edge_totals = _write_edge_csvs(output_dir, edges_by_type, columns)
+    _generate_import_cypher(output_dir, node_totals, edge_totals, columns)
     _generate_import_sh(output_dir)
 
     counts["nodes"] = node_totals
@@ -135,7 +137,7 @@ def export_to_csv(
 # ---------------------------------------------------------------------------
 
 
-def _write_node_csvs(output_dir: Path, nodes_by_label: dict) -> dict:
+def _write_node_csvs(output_dir: Path, nodes_by_label: dict, columns_out: dict) -> dict:
     totals = {}
     for label, bucket in nodes_by_label.items():
         rows = [_flatten_for_csv(n["properties"]) for n in bucket.values()]
@@ -144,11 +146,12 @@ def _write_node_csvs(output_dir: Path, nodes_by_label: dict) -> dict:
         columns = _union_columns(rows)
         path = output_dir / _LABEL_TO_FILENAME.get(label, f"{label.lower()}.csv")
         _write_csv(path, columns, rows)
+        columns_out[path.name] = columns
         totals[label] = len(rows)
     return totals
 
 
-def _write_edge_csvs(output_dir: Path, edges_by_type: dict) -> dict:
+def _write_edge_csvs(output_dir: Path, edges_by_type: dict, columns_out: dict) -> dict:
     totals = {}
     for rel_type in _ALL_REL_TYPES:
         edges = edges_by_type.get(rel_type, [])
@@ -165,6 +168,7 @@ def _write_edge_csvs(output_dir: Path, edges_by_type: dict) -> dict:
         columns = _union_columns(rows)
         path = output_dir / f"{rel_type.lower()}.csv"
         _write_csv(path, columns, rows)
+        columns_out[path.name] = columns
         totals[rel_type] = len(rows)
     return totals
 
@@ -180,7 +184,9 @@ def _write_csv(path: Path, columns: list, rows: list) -> None:
 
 def _flatten_for_csv(props: dict) -> dict:
     """Lists become JSON-encoded strings so CSV stays single-valued per cell.
-    Cypher's LOAD CSV step parses these back via apoc.convert.fromJsonList().
+    The generated ``import.cypher`` loads them as those JSON strings (it does
+    not depend on APOC); numbers, booleans and full dates are cast back to
+    their Neo4j types there — see ``utils.property_types``.
 
     String values have backslashes doubled so that Neo4j's default legacy
     quote escaping (``dbms.import.csv.legacy_quote_escaping=true``) does not
@@ -231,29 +237,58 @@ CALL {
     WITH row, start, COALESCE(e_t, p_t, u_t) AS target
     WHERE start IS NOT NULL AND target IS NOT NULL
     CREATE (start)-[r:%s]->(target)
-    SET r += row
+%s
 } IN TRANSACTIONS OF 10000 ROWS;
 """
 
 
-def _generate_import_cypher(output_dir: Path, node_totals: dict, edge_totals: dict) -> None:
+_EDGE_ENDPOINT_COLUMNS = frozenset({"start_key", "end_key"})
+
+
+def _render_typed_set(var: str, columns: list, skip: frozenset = frozenset()) -> str:
+    """Explicit, typed ``SET`` clause for every CSV column.
+
+    Replaces ``SET n += row``: ``LOAD CSV`` reads every cell as a string, so
+    a bare ``+=`` stored share percentages as ``"75.0"`` and booleans as
+    ``"true"``. Each column is cast by ``utils.property_types.cypher_cast``.
+    """
+    assignments = [
+        f"{var}.{_prop_name(c)} = {cypher_cast(c)}"
+        for c in columns if c not in skip
+    ]
+    if not assignments:
+        return ""
+    return "    SET " + ",\n        ".join(assignments)
+
+
+def _prop_name(col: str) -> str:
+    return col if col.isidentifier() else f"`{col}`"
+
+
+def _generate_import_cypher(
+    output_dir: Path, node_totals: dict, edge_totals: dict, columns: dict,
+) -> None:
     sections: list[str] = []
+
+    def node(filename: str, label: str, key_prop: str) -> str:
+        return _render_load_node(filename, label, key_prop, columns.get(filename, [key_prop]))
+
     sections.append(_HEADER)
     sections.append(_CONSTRAINTS_BLOCK)
 
     if node_totals.get("Country"):
-        sections.append(_render_load_node("country.csv", "Country", "code"))
+        sections.append(node("country.csv", "Country", "code"))
     if node_totals.get("Identifier"):
-        sections.append(_render_load_node("identifier.csv", "Identifier", "uid"))
+        sections.append(node("identifier.csv", "Identifier", "uid"))
     if node_totals.get("Address"):
-        sections.append(_render_load_node("address.csv", "Address", "uid"))
+        sections.append(node("address.csv", "Address", "uid"))
     if node_totals.get("Entity"):
-        sections.append(_render_load_node("entity.csv", "Entity", "recordId"))
+        sections.append(node("entity.csv", "Entity", "recordId"))
         sections.append(_ENTITY_SUBTYPE_FIXUP)
     if node_totals.get("Person"):
-        sections.append(_render_load_node("person.csv", "Person", "recordId"))
+        sections.append(node("person.csv", "Person", "recordId"))
     if node_totals.get("UnspecifiedParty"):
-        sections.append(_render_load_node("unspecified_party.csv", "UnspecifiedParty", "uid"))
+        sections.append(node("unspecified_party.csv", "UnspecifiedParty", "uid"))
 
     if edge_totals.get("HAS_IDENTIFIER"):
         sections.append(_HAS_IDENTIFIER_LOAD)
@@ -267,7 +302,11 @@ def _generate_import_cypher(output_dir: Path, node_totals: dict, edge_totals: di
         sections.append(_BORN_IN_LOAD)
     for family in FAMILY_REL_TYPES:
         if edge_totals.get(family):
-            sections.append(_PARTY_TO_SUBJECT_LOAD_TPL % (f"{family.lower()}.csv", family))
+            filename = f"{family.lower()}.csv"
+            set_clause = _render_typed_set(
+                "r", columns.get(filename, []), skip=_EDGE_ENDPOINT_COLUMNS,
+            )
+            sections.append(_PARTY_TO_SUBJECT_LOAD_TPL % (filename, family, set_clause))
 
     sections.append(_FULLTEXT_INDEX)
     sections.append(_SUMMARY_QUERY)
@@ -322,14 +361,15 @@ CREATE CONSTRAINT constraint_unspecified_party_uid IF NOT EXISTS
 FOR (u:UnspecifiedParty) REQUIRE u.uid IS UNIQUE;
 """
 
-def _render_load_node(filename: str, label: str, key_prop: str) -> str:
+def _render_load_node(filename: str, label: str, key_prop: str, columns: list) -> str:
+    set_clause = _render_typed_set("n", columns, skip=frozenset({key_prop}))
     return (
         f"\nLOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row\n"
         "CALL {\n"
         "    WITH row\n"
         f"    MERGE (n:{label} {{{key_prop}: row.{key_prop}}})\n"
-        "    SET n += row\n"
-        "} IN TRANSACTIONS OF 10000 ROWS;\n"
+        + (f"{set_clause}\n" if set_clause else "")
+        + "} IN TRANSACTIONS OF 10000 ROWS;\n"
     )
 
 _ENTITY_SUBTYPE_FIXUP = """

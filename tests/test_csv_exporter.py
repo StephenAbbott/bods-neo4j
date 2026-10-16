@@ -121,3 +121,45 @@ class TestBackslashEscaping:
         export_to_csv(SAMPLE_FILE, export_dir)
         script = (export_dir / "import.sh").read_text()
         assert "legacy_quote_escaping" in script
+
+
+class TestTypedImport:
+    """LOAD CSV reads every cell as a string, so import.cypher must cast typed
+    columns instead of ``SET r += row`` (which stored shares as "75.0")."""
+
+    def test_no_untyped_bulk_set(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "+= row" not in script
+
+    def test_share_columns_cast_to_float(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "r.shareExact = toFloat(row.shareExact)" in script
+
+    def test_booleans_and_ints_cast(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "n.isComponent = toBoolean(row.isComponent)" in script
+        assert "r.isComponent = toBoolean(row.isComponent)" in script
+        assert "r.interestIndex = toInteger(row.interestIndex)" in script
+
+    def test_full_dates_cast_with_regex_guard(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert (
+            "r.statementDate = CASE WHEN row.statementDate =~ "
+            "'\\\\d{4}-\\\\d{2}-\\\\d{2}' THEN date(row.statementDate) "
+            "ELSE row.statementDate END"
+        ) in script
+
+    def test_endpoint_keys_not_copied_onto_edges(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "r.start_key" not in script
+        assert "r.end_key" not in script
+
+    def test_merge_key_not_reset(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "n.recordId = row.recordId" not in script

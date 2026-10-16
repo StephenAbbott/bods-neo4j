@@ -62,6 +62,7 @@ from ..utils.neo4j_helpers import (
     clear_database,
     get_database_stats,
 )
+from ..utils.property_types import to_neo4j_value
 from .mapper import map_statement
 from .reader import read_bods_file
 
@@ -463,5 +464,6 @@ def _execute_batches(driver, database, query, batch, batch_size, description):
 def _serialise_props(props: dict) -> dict:
     """Neo4j accepts primitives, booleans, and lists of primitives — but not
     nested dicts. Anything we couldn't flatten ended up under a ``*Json`` key
-    already, so we just pass through here."""
-    return {k: v for k, v in props.items() if v is not None}
+    already. Full ISO dates become Neo4j ``DATE`` values so this loader and
+    the CSV import (``import.cypher``) produce identically typed graphs."""
+    return {k: to_neo4j_value(k, v) for k, v in props.items() if v is not None}
