@@ -22,7 +22,6 @@ the graph-native shape emitted by ``bods_to_neo4j.mapper``:
         import.sh        Convenience runner via cypher-shell
 """
 
-import csv
 import json
 import logging
 from collections import defaultdict
@@ -121,9 +120,10 @@ def export_to_csv(
             edges_by_type[edge["rel_type"]].append(edge)
 
     columns: dict[str, list] = {}
-    node_totals = _write_node_csvs(output_dir, nodes_by_label, columns)
-    edge_totals = _write_edge_csvs(output_dir, edges_by_type, columns)
-    _generate_import_cypher(output_dir, node_totals, edge_totals, columns)
+    json_lists: dict[str, frozenset] = {}
+    node_totals = _write_node_csvs(output_dir, nodes_by_label, columns, json_lists)
+    edge_totals = _write_edge_csvs(output_dir, edges_by_type, columns, json_lists)
+    _generate_import_cypher(output_dir, node_totals, edge_totals, columns, json_lists)
     _generate_import_sh(output_dir)
 
     counts["nodes"] = node_totals
@@ -143,7 +143,9 @@ def export_to_csv(
 # ---------------------------------------------------------------------------
 
 
-def _write_node_csvs(output_dir: Path, nodes_by_label: dict, columns_out: dict) -> dict:
+def _write_node_csvs(
+    output_dir: Path, nodes_by_label: dict, columns_out: dict, json_lists_out: dict,
+) -> dict:
     totals = {}
     for label, bucket in nodes_by_label.items():
         rows = [_flatten_for_csv(n["properties"]) for n in bucket.values()]
@@ -153,11 +155,16 @@ def _write_node_csvs(output_dir: Path, nodes_by_label: dict, columns_out: dict) 
         path = output_dir / _LABEL_TO_FILENAME.get(label, f"{label.lower()}.csv")
         _write_csv(path, columns, rows)
         columns_out[path.name] = columns
+        json_lists_out[path.name] = _json_list_columns(
+            n["properties"] for n in bucket.values()
+        )
         totals[label] = len(rows)
     return totals
 
 
-def _write_edge_csvs(output_dir: Path, edges_by_type: dict, columns_out: dict) -> dict:
+def _write_edge_csvs(
+    output_dir: Path, edges_by_type: dict, columns_out: dict, json_lists_out: dict,
+) -> dict:
     totals = {}
     for rel_type in _ALL_REL_TYPES:
         edges = edges_by_type.get(rel_type, [])
@@ -175,28 +182,50 @@ def _write_edge_csvs(output_dir: Path, edges_by_type: dict, columns_out: dict) -
         path = output_dir / f"{rel_type.lower()}.csv"
         _write_csv(path, columns, rows)
         columns_out[path.name] = columns
+        json_lists_out[path.name] = _json_list_columns(e["properties"] for e in edges)
         totals[rel_type] = len(rows)
     return totals
 
 
+_MUST_QUOTE = (",", '"', "\n", "\r", "\\")
+
+
+def _csv_cell(value) -> str:
+    """One CSV cell for Neo4j's ``LOAD CSV`` with its default
+    ``db.import.csv.legacy_quote_escaping=true``.
+
+    RFC-4180 quoting (``"`` doubled inside a quoted cell), plus: every cell
+    containing a backslash is quoted. In legacy mode Neo4j un-doubles ``\\\\``
+    only inside a quoted cell, so an unquoted ``C:\\\\path`` (backslashes
+    already doubled by ``_flatten_for_csv``) would load as ``C:\\\\path``.
+    Empty values stay unquoted so ``LOAD CSV`` reads them as ``null``.
+    """
+    s = "" if value is None else str(value)
+    if s and any(ch in s for ch in _MUST_QUOTE):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
 def _write_csv(path: Path, columns: list, rows: list) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-        writer.writeheader()
+        f.write(",".join(_csv_cell(c) for c in columns) + "\r\n")
         for row in rows:
-            writer.writerow(row)
+            f.write(",".join(_csv_cell(row.get(c)) for c in columns) + "\r\n")
     logger.debug("Wrote %d rows to %s", len(rows), path)
 
 
 def _flatten_for_csv(props: dict) -> dict:
     """Lists become JSON-encoded strings so CSV stays single-valued per cell.
-    The generated ``import.cypher`` loads them as those JSON strings (it does
-    not depend on APOC); numbers, booleans and full dates are cast back to
-    their Neo4j types there — see ``utils.property_types``.
+    The generated ``import.cypher`` parses them back into native lists with
+    APOC's ``apoc.convert.fromJsonList``; numbers, booleans and full dates are
+    cast back to their Neo4j types there — see ``utils.property_types``.
 
-    String values have backslashes doubled so that Neo4j's default legacy
-    quote escaping (``dbms.import.csv.legacy_quote_escaping=true``) does not
-    misinterpret ``\\"`` sequences as escaped quotes.
+    String values have backslashes doubled, and ``_csv_cell`` quotes every
+    cell that contains one, so that Neo4j's default legacy quote escaping
+    (``db.import.csv.legacy_quote_escaping=true``) reads ``\\"`` back as the
+    original backslash-quote rather than as an escaped quote. The files are
+    written for that default; with it switched off every backslash would
+    load doubled.
     """
     out = {}
     for k, v in props.items():
@@ -214,6 +243,17 @@ def _flatten_for_csv(props: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _json_list_columns(props_iter) -> frozenset:
+    """Columns written as JSON-encoded lists (every list property except the
+    ``SPLIT_LIST_PROPS``, which are written separator-joined)."""
+    found = set()
+    for props in props_iter:
+        for k, v in props.items():
+            if isinstance(v, list) and k not in SPLIT_LIST_PROPS:
+                found.add(k)
+    return frozenset(found)
 
 
 def _union_columns(rows: list) -> list:
@@ -254,15 +294,20 @@ CALL {
 _EDGE_ENDPOINT_COLUMNS = frozenset({"start_key", "end_key"})
 
 
-def _render_typed_set(var: str, columns: list, skip: frozenset = frozenset()) -> str:
+def _render_typed_set(
+    var: str, columns: list, skip: frozenset = frozenset(),
+    json_lists: frozenset = frozenset(),
+) -> str:
     """Explicit, typed ``SET`` clause for every CSV column.
 
     Replaces ``SET n += row``: ``LOAD CSV`` reads every cell as a string, so
     a bare ``+=`` stored share percentages as ``"75.0"`` and booleans as
-    ``"true"``. Each column is cast by ``utils.property_types.cypher_cast``.
+    ``"true"``. Each column is cast by ``utils.property_types.cypher_cast``;
+    JSON-encoded list columns are parsed back with APOC's
+    ``apoc.convert.fromJsonList`` so they load as native lists.
     """
     assignments = [
-        f"{var}.{_prop_name(c)} = {cypher_cast(c)}"
+        f"{var}.{_prop_name(c)} = {cypher_cast(c, json_list=c in json_lists)}"
         for c in columns if c not in skip
     ]
     if not assignments:
@@ -276,13 +321,20 @@ def _prop_name(col: str) -> str:
 
 def _generate_import_cypher(
     output_dir: Path, node_totals: dict, edge_totals: dict, columns: dict,
+    json_lists: dict = None,
 ) -> None:
     sections: list[str] = []
+    json_lists = json_lists or {}
 
     def node(filename: str, label: str, key_prop: str) -> str:
-        return _render_load_node(filename, label, key_prop, columns.get(filename, [key_prop]))
+        return _render_load_node(
+            filename, label, key_prop, columns.get(filename, [key_prop]),
+            json_lists.get(filename, frozenset()),
+        )
 
     sections.append(_HEADER)
+    if any(json_lists.values()):
+        sections.append(_APOC_CHECK)
     sections.append(_CONSTRAINTS_BLOCK)
 
     if node_totals.get("Country"):
@@ -314,6 +366,7 @@ def _generate_import_cypher(
             filename = f"{family.lower()}.csv"
             set_clause = _render_typed_set(
                 "r", columns.get(filename, []), skip=_EDGE_ENDPOINT_COLUMNS,
+                json_lists=json_lists.get(filename, frozenset()),
             )
             sections.append(_PARTY_TO_SUBJECT_LOAD_TPL % (filename, family, set_clause))
 
@@ -330,12 +383,15 @@ def _generate_import_sh(output_dir: Path) -> None:
 # Run the import.cypher script via cypher-shell against a running Neo4j instance.
 # Place the CSV files in Neo4j's import directory (or serve them via HTTP) first.
 #
-# NOTE: If your Neo4j instance uses the default legacy CSV quote escaping
-# (dbms.import.csv.legacy_quote_escaping=true), start it with:
-#   NEO4J_dbms_import_csv_legacy__quote__escaping=false
-# or set the option in neo4j.conf.  The CSV files produced by bods-neo4j use
-# standard RFC-4180 escaping (doubled quotes); legacy backslash escaping can
-# misparse cells that contain literal backslashes.
+# Requirements:
+#   * APOC Core, for apoc.convert.fromJsonList() (list properties). Neo4j 5
+#     bundles it as labs/apoc-*-core.jar: copy it into plugins/ (Docker:
+#     NEO4J_PLUGINS='["apoc"]').
+#   * Neo4j's DEFAULT CSV quote handling, db.import.csv.legacy_quote_escaping
+#     =true. The CSVs double backslashes and quote every cell containing one,
+#     which that setting reads back exactly. Do NOT set it to false: every
+#     backslash in a name would then load doubled, and JSON list cells that
+#     contain one would fail to parse.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cypher-shell "${@}" < "${DIR}/import.cypher"
@@ -355,6 +411,15 @@ _HEADER = """// BODS Neo4j Import Script
 // Run from Neo4j Browser or cypher-shell with CSVs in the import directory.
 """
 
+_APOC_CHECK = """
+// List properties (sourceTypes, nationalityCodes, alternateNames, ...) are
+// stored in the CSVs as JSON arrays and parsed back with APOC Core's
+// apoc.convert.fromJsonList(). If this line fails with "Unknown function",
+// install APOC Core (bundled with Neo4j 5 as labs/apoc-*-core.jar; see the
+// README) and run the script again.
+RETURN size(apoc.convert.fromJsonList('[1]')) AS apoc_available;
+"""
+
 _CONSTRAINTS_BLOCK = """
 CREATE CONSTRAINT constraint_entity_record_id IF NOT EXISTS
 FOR (e:Entity) REQUIRE e.recordId IS UNIQUE;
@@ -370,8 +435,13 @@ CREATE CONSTRAINT constraint_unspecified_party_uid IF NOT EXISTS
 FOR (u:UnspecifiedParty) REQUIRE u.uid IS UNIQUE;
 """
 
-def _render_load_node(filename: str, label: str, key_prop: str, columns: list) -> str:
-    set_clause = _render_typed_set("n", columns, skip=frozenset({key_prop}))
+def _render_load_node(
+    filename: str, label: str, key_prop: str, columns: list,
+    json_lists: frozenset = frozenset(),
+) -> str:
+    set_clause = _render_typed_set(
+        "n", columns, skip=frozenset({key_prop}), json_lists=json_lists,
+    )
     return (
         f"\nLOAD CSV WITH HEADERS FROM 'file:///{filename}' AS row\n"
         "CALL {\n"

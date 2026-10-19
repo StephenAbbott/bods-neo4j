@@ -184,3 +184,56 @@ class TestIdentifiersProperty:
                 assert scheme and ident and scheme == scheme.lower()
         script = (export_dir / "import.cypher").read_text()
         assert "split(row.identifiers, '\\u001F')" in script
+
+
+class TestJsonListColumns:
+    """Issue #4: list properties load as native lists via APOC."""
+
+    def test_list_columns_parsed_with_apoc(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert (
+            "n.nationalityCodes = CASE WHEN row.nationalityCodes IS NULL THEN null "
+            "ELSE apoc.convert.fromJsonList(row.nationalityCodes) END"
+        ) in script
+
+    def test_script_checks_apoc_first(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert script.index("apoc_available") < script.index("CREATE CONSTRAINT")
+
+    def test_scalar_columns_not_parsed_as_json(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        script = (export_dir / "import.cypher").read_text()
+        assert "apoc.convert.fromJsonList(row.name)" not in script
+        assert "n.name = row.name" in script
+
+    def test_identifiers_still_split_not_json(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir, identifiers_property=True)
+        script = (export_dir / "import.cypher").read_text()
+        assert "apoc.convert.fromJsonList(row.identifiers)" not in script
+
+
+class TestCsvCellQuoting:
+    """Cells are written for Neo4j's default legacy_quote_escaping=true, which
+    un-doubles backslashes only inside quoted cells."""
+
+    def test_backslash_cell_is_quoted(self):
+        from bods_neo4j.bods_to_neo4j.csv_exporter import _csv_cell
+        assert _csv_cell("C:\\\\path") == '"C:\\\\path"'
+
+    def test_empty_stays_unquoted_so_it_loads_as_null(self):
+        from bods_neo4j.bods_to_neo4j.csv_exporter import _csv_cell
+        assert _csv_cell("") == ""
+        assert _csv_cell(None) == ""
+
+    def test_rfc4180_quotes_doubled(self):
+        from bods_neo4j.bods_to_neo4j.csv_exporter import _csv_cell
+        assert _csv_cell('say "hi"') == '"say ""hi"""'
+        assert _csv_cell("a,b") == '"a,b"'
+        assert _csv_cell("plain") == "plain"
+
+    def test_written_csv_reads_back_with_python_csv(self, export_dir):
+        export_to_csv(SAMPLE_FILE, export_dir)
+        rows = _rows(export_dir / "person.csv")
+        assert rows and all("recordId" in r for r in rows)

@@ -71,10 +71,15 @@ This produces:
 | `statementDate`, `publicationDate`, `startDate`, `endDate`, `foundingDate`, `dissolutionDate`, `formedByStatuteDate` | `DATE` when a full `YYYY-MM-DD`; otherwise kept as the source string |
 | `birthDate`, `deathDate` | `STRING` (BODS allows partial dates such as `1970-06`) |
 
-The type map lives in `src/bods_neo4j/utils/property_types.py`. List properties (`sourceTypes`, `alternateNames`, `nationalityCodes`, …) are still JSON-encoded strings in the CSV route; the driver route stores them as native lists.
+The type map lives in `src/bods_neo4j/utils/property_types.py`. List properties (`sourceTypes`, `alternateNames`, `nationalityCodes`, …) load as native lists in both routes; the CSV route parses them with APOC (see above).
 
 UK PSC and similar sources publish share **bands** (e.g. `shareMinimum` 25 / `shareMaximum` 50), not exact figures. Both bounds are kept as numbers; turning a band into one weight is left to each query — use the lower bound for a conservative control test, or the midpoint for centrality weights, and say which you used.
 - `import.sh` — convenience wrapper that pipes `import.cypher` through `cypher-shell`
+
+`import.cypher` needs two things from the Neo4j instance:
+
+- **APOC Core.** List properties (`sourceTypes`, `nationalityCodes`, `alternateNames`, annotation arrays…) are stored in the CSVs as JSON arrays and parsed back with `apoc.convert.fromJsonList()`. Neo4j 5 ships APOC Core as `labs/apoc-*-core.jar`: copy it into `plugins/` and restart. The `docker-compose.yml` here already enables it (`NEO4J_PLUGINS='["apoc"]'`). The script checks for APOC first and stops with "Unknown function" if it is missing.
+- **Neo4j's default CSV quote handling** (`db.import.csv.legacy_quote_escaping=true`). The CSVs double every backslash and quote every cell that contains one, which that setting reads back exactly. Don't switch it off: every backslash in a name would then load doubled.
 
 ### 3. BODS → Neo4j (direct driver load)
 
@@ -149,7 +154,7 @@ The 23 BODS interest types collapse into five Cypher relationship-type families 
 
 ### Round-Trip Fidelity
 
-The reverse mapper rebuilds `identifiers` / `addresses` by aggregating their related graph nodes, and rebuilds `interests[]` by grouping typed edges that share a `statementId` and sorting by `interestIndex`. No `*_json` blobs on nodes or edges. Any publisher-specific or forward-compat fields the structured extraction does not recognise are preserved verbatim in a single `extrasJson` catch-all per node / first edge. Data can be converted back to valid BODS v0.4 format without loss when it was loaded with `to-neo4j`. The CSV route (`to-csv` + `import.cypher`) still loads list properties such as `sourceTypes` and `nationalityCodes` as JSON-encoded strings, so a graph loaded that way exports without `source.type` and person nationalities.
+The reverse mapper rebuilds `identifiers` / `addresses` by aggregating their related graph nodes, and rebuilds `interests[]` by grouping typed edges that share a `statementId` and sorting by `interestIndex`. No `*_json` blobs on nodes or edges. Any publisher-specific or forward-compat fields the structured extraction does not recognise are preserved verbatim in a single `extrasJson` catch-all per node / first edge. Data can be converted back to valid BODS v0.4 format without loss, whichever route loaded it: `to-neo4j` and `to-csv` + `import.cypher` build graphs with the same property types.
 
 ## Cross-source entity resolution
 
@@ -163,7 +168,7 @@ Identifiers are modelled as `(:Identifier)` nodes reached by `HAS_IDENTIFIER`. T
 identifiers: ["xi-lei:5493001KJTIIGC8Y1R12", "gb-coh:00041424"]
 ```
 
-Each value is `scheme:id`, with the scheme lowercased and the id exactly as published, in the statement's order and without duplicates. An identifier with no scheme is left out, because a bare number cannot be told apart from the same digits on another register. The `(:Identifier)` nodes are unchanged, and `to-bods` ignores the property. Both routes load it as a native list (the CSV route splits one cell, with no APOC needed). It also makes plain Cypher matching a one-step query:
+Each value is `scheme:id`, with the scheme lowercased and the id exactly as published, in the statement's order and without duplicates. An identifier with no scheme is left out, because a bare number cannot be told apart from the same digits on another register. The `(:Identifier)` nodes are unchanged, and `to-bods` ignores the property. Both routes load it as a native list (the CSV route splits one cell rather than parsing JSON). It also makes plain Cypher matching a one-step query:
 
 ```cypher
 MATCH (a:Entity), (b:Entity)

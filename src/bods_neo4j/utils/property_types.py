@@ -63,8 +63,9 @@ DATE_PROPS = frozenset({
 })
 
 # List properties the CSV route writes as one cell joined by an ASCII unit
-# separator and loads back with split(), so they arrive as native lists
-# without APOC. (Other lists stay JSON-encoded strings in the CSV route.)
+# separator and loads back with split(). Every other list property is written
+# as a JSON array and parsed back with apoc.convert.fromJsonList (which keeps
+# element types, e.g. booleans), so the CSV route needs APOC Core.
 SPLIT_LIST_PROPS = frozenset({
     "identifiers",
 })
@@ -90,7 +91,7 @@ def to_neo4j_value(key: str, value):
     return value
 
 
-def cypher_cast(key: str, var: str = "row") -> str:
+def cypher_cast(key: str, var: str = "row", json_list: bool = False) -> str:
     """Cypher expression reading CSV column ``key`` from ``var`` with its type.
 
     ``LOAD CSV`` yields ``null`` for empty unquoted cells, and ``toFloat`` /
@@ -111,6 +112,9 @@ def cypher_cast(key: str, var: str = "row") -> str:
             f"CASE WHEN toLower({col}) IN ['true', 'false'] "
             f"THEN toBoolean({col}) ELSE toFloat({col}) END"
         )
+    if json_list:
+        return (f"CASE WHEN {col} IS NULL THEN null "
+                f"ELSE apoc.convert.fromJsonList({col}) END")
     if key in SPLIT_LIST_PROPS:
         return f"CASE WHEN {col} IS NULL THEN null ELSE split({col}, '\\u001F') END"
     if key in DATE_PROPS:
