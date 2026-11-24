@@ -200,3 +200,17 @@ def test_script_builds_the_driver_routes_graph(tmp_path, path):
         assert _snapshot(driver) == expected
     finally:
         driver.close()
+
+
+def test_rows_that_merge_onto_one_edge_are_folded():
+    from bods_neo4j.bods_to_neo4j.cypher_exporter import _fold_merged
+    rows = [{"s": "a1", "t": "EE", "p": {"x": 1}},
+            {"s": "a1", "t": "EE", "p": {"y": 2}},
+            {"s": "a2", "t": "EE", "p": {}}]
+    assert _fold_merged(rows, ()) == [
+        {"s": "a1", "t": "EE", "p": {"x": 1, "y": 2}},
+        {"s": "a2", "t": "EE", "p": {}},
+    ]
+    keyed = [{"s": "e", "t": "ad", "p": {"type": "registered", "ordinal": 0}},
+             {"s": "e", "t": "ad", "p": {"type": "business", "ordinal": 0}}]
+    assert len(_fold_merged(keyed, ("type", "ordinal"))) == 2

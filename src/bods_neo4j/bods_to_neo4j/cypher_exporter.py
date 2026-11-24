@@ -166,6 +166,9 @@ def write_cypher(
                 {"s": e["start_key_value"], "t": e["end_key_value"],
                  "p": _clean_props(e["properties"])}
             )
+        if rel_type not in FAMILY_REL_TYPES:
+            groups = {pair: _fold_merged(rows, _MERGE_KEYS.get(rel_type, ()))
+                      for pair, rows in groups.items()}
         total = 0
         for ((s_label, s_key), (t_label, t_key)), rows in groups.items():
             out.write(f"\n// ({s_label})-[:{rel_type}]->({t_label}) ({len(rows):,})\n")
@@ -185,6 +188,23 @@ def write_cypher(
 
     out.write(_SUMMARY_QUERY)
     return node_totals, edge_totals, dropped
+
+
+def _fold_merged(rows: list[dict], keys: tuple[str, ...]) -> list[dict]:
+    """Fold rows that MERGE onto one edge into one row.
+
+    The database would fold them anyway (each later ``SET r += row.p``
+    overwrites the earlier keys); folding here makes the batch, and the
+    count in the header, match the edges the script creates.
+    """
+    folded: dict[tuple, dict] = {}
+    for row in rows:
+        k = (row["s"], row["t"], *(repr(row["p"].get(x)) for x in keys))
+        if k in folded:
+            folded[k]["p"] = {**folded[k]["p"], **row["p"]}
+        else:
+            folded[k] = {"s": row["s"], "t": row["t"], "p": dict(row["p"])}
+    return list(folded.values())
 
 
 def _endpoint(edge: dict, side: str, written: set) -> tuple[str, str] | None:
