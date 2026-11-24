@@ -81,7 +81,24 @@ UK PSC and similar sources publish share **bands** (e.g. `shareMinimum` 25 / `sh
 - **APOC Core.** List properties (`sourceTypes`, `nationalityCodes`, `alternateNames`, annotation arrays…) are stored in the CSVs as JSON arrays and parsed back with `apoc.convert.fromJsonList()`. Neo4j 5 ships APOC Core as `labs/apoc-*-core.jar`: copy it into `plugins/` and restart. The `docker-compose.yml` here already enables it (`NEO4J_PLUGINS='["apoc"]'`). The script checks for APOC first and stops with "Unknown function" if it is missing.
 - **Neo4j's default CSV quote handling** (`db.import.csv.legacy_quote_escaping=true`). The CSVs double every backslash and quote every cell that contains one, which that setting reads back exactly. Don't switch it off: every backslash in a name would then load doubled.
 
-### 3. BODS → Neo4j (direct driver load)
+### 3. BODS → a portable Cypher script (no APOC)
+
+For a Neo4j without APOC, Memgraph, or an embedded engine such as Neo4j Labs' Relate:
+
+```bash
+bods-neo4j to-cypher examples/sample_data/sample_bods.json -o bods.cypher
+cypher-shell -f bods.cypher
+```
+
+The script holds the data as Cypher literals in `UNWIND` batches (`--batch-size`, default 200 rows). It uses no APOC, no `LOAD CSV` and no `CALL … IN TRANSACTIONS`, so lists, dates, floats and booleans load with their real types and there is no CSV quoting to configure. It builds the same graph as the direct driver load: nodes, relationships, properties and types all match, which `tests/test_cypher_exporter.py` checks against a live Neo4j when `BODS_NEO4J_TEST_URI` is set.
+
+`--dialect` picks the schema block at the top. `neo4j` (the default) writes uniqueness constraints, `memgraph` writes `CREATE INDEX ON :Label(key)`, and `none` writes nothing, for engines with their own index syntax. `--identifiers-property` adds the identifiers list to each node, as `to-csv` does.
+
+Measured on Neo4j 5.26 Community without APOC: the Azerbaijani Laundromat release (13,972 nodes, 18,621 relationships) loads and matches the driver route exactly. The Estonia release (348,794 statements; 287,989 nodes, 601,995 relationships) exports in about 75 s to a 504 MB script, 47 MB gzipped.
+
+**For a large file on Neo4j, use the driver load instead.** Every batch in the script is a new query text, so the server parses each one from scratch, and that makes the script much slower than `to-neo4j` on a big graph. It also needs memory: with 1,000-row batches the Estonia script ran a default 1 GB Neo4j heap out of memory, and `cypher-shell -f` ran out of its own client heap because it holds the whole file. The script is meant for engines that have no Neo4j driver route or no APOC, and for small and medium files.
+
+### 4. BODS → Neo4j (direct driver load)
 
 Load BODS data directly into Neo4j:
 
@@ -92,7 +109,7 @@ bods-neo4j to-neo4j examples/sample_data/sample_bods.json \
     --password bodspassword
 ```
 
-### 4. Neo4j → BODS
+### 5. Neo4j → BODS
 
 Export the graph back to BODS format:
 
@@ -104,7 +121,7 @@ bods-neo4j to-bods output.jsonl \
     --publisher-name "My Organisation"
 ```
 
-### 5. Inspect data
+### 6. Inspect data
 
 ```bash
 # BODS file statistics
