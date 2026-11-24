@@ -2,6 +2,7 @@
 
 Commands:
     bods-neo4j to-csv      Export BODS data to Neo4j CSV files + import scripts
+    bods-neo4j to-cypher   Export BODS data to one APOC-free Cypher script
     bods-neo4j to-neo4j    Load BODS data directly into Neo4j via driver
     bods-neo4j to-bods     Export Neo4j graph data back to BODS format
     bods-neo4j info        Show counts from a BODS file
@@ -78,6 +79,45 @@ def to_csv(bods_file, output_dir, identifiers_property, verbose):
     click.echo(f"  - one CSV per node label and per relationship type")
     click.echo(f"  - import.cypher (LOAD CSV script)")
     click.echo(f"  - import.sh (cypher-shell wrapper)")
+
+
+@main.command("to-cypher")
+@click.argument("bods_file", type=click.Path(exists=True))
+@click.option("-o", "--output", "output_path", default="./bods.cypher",
+              help="Output Cypher script")
+@click.option("--dialect", type=click.Choice(["neo4j", "memgraph", "none"]),
+              default="neo4j", show_default=True,
+              help="How the index statements at the top are spelled "
+                   "('none' writes no indexes)")
+@click.option("--batch-size", default=200, show_default=True,
+              help="Rows per UNWIND statement")
+@click.option("--identifiers-property", is_flag=True,
+              help="Also write an 'identifiers' array (scheme:id) on Entity/Person "
+                   "nodes, for tools that read node-local properties only")
+@click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging")
+def to_cypher(bods_file, output_path, dialect, batch_size, identifiers_property, verbose):
+    """Export BODS data to one self-contained Cypher script (no APOC).
+
+    Every value is a native Cypher literal in UNWIND batches, so the script
+    loads with cypher-shell on Neo4j without APOC, on Memgraph, or on any
+    engine that runs plain Cypher. No CSV files or import directory needed.
+
+    BODS_FILE is the path to a BODS JSON or JSONL file.
+    """
+    _setup_logging(verbose)
+    from .bods_to_neo4j.cypher_exporter import export_to_cypher
+
+    counts = export_to_cypher(bods_file, output_path,
+                              identifiers_property=identifiers_property,
+                              dialect=dialect, batch_size=batch_size)
+    click.echo(f"\nWrote {output_path}")
+    click.echo(f"  Entity statements:       {counts['entity_statements']:,}")
+    click.echo(f"  Person statements:       {counts['person_statements']:,}")
+    click.echo(f"  Relationship statements: {counts['relationship_statements']:,}")
+    click.echo(f"  Nodes: {sum(counts['nodes'].values()):,}  "
+               f"Edges: {sum(counts['edges'].values()):,}  "
+               f"Edges without an endpoint in the file: {counts['edges_dropped']:,}")
+    click.echo(f"\nLoad it with:  cypher-shell -f {output_path}")
 
 
 @main.command("to-neo4j")

@@ -70,6 +70,40 @@ def export_to_csv(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    counts, nodes_by_label, edges_by_type = collect_graph(
+        bods_file, identifiers_property=identifiers_property,
+    )
+
+    columns: dict[str, list] = {}
+    json_lists: dict[str, frozenset] = {}
+    node_totals = _write_node_csvs(output_dir, nodes_by_label, columns, json_lists)
+    edge_totals = _write_edge_csvs(output_dir, edges_by_type, columns, json_lists)
+    _generate_import_cypher(output_dir, node_totals, edge_totals, columns, json_lists)
+    _generate_import_sh(output_dir)
+
+    counts["nodes"] = node_totals
+    counts["edges"] = edge_totals
+    logger.info(
+        "Export complete: %s entity / %s person / %s relationship statements "
+        "(%s superseded skipped, %s malformed skipped)",
+        counts["entity_statements"], counts["person_statements"],
+        counts["relationship_statements"],
+        counts["skipped_superseded"], counts["skipped"],
+    )
+    return counts
+
+
+def collect_graph(
+    bods_file: Union[str, Path], identifiers_property: bool = False,
+) -> tuple[dict, dict[str, dict], dict[str, list]]:
+    """Forward-map a BODS file into deduplicated node buckets and edge lists.
+
+    Shared by the CSV exporter and the portable Cypher exporter
+    (``cypher_exporter``) so both write the same graph. Returns
+    ``(counts, nodes_by_label, edges_by_type)``: ``nodes_by_label`` maps a
+    primary label to ``{key_value: node_spec}`` (later non-empty values win),
+    ``edges_by_type`` maps a relationship type to its edge specs.
+    """
     counts = {
         "entity_statements": 0,
         "person_statements": 0,
@@ -119,23 +153,7 @@ def export_to_csv(
         for edge in graph["edges"]:
             edges_by_type[edge["rel_type"]].append(edge)
 
-    columns: dict[str, list] = {}
-    json_lists: dict[str, frozenset] = {}
-    node_totals = _write_node_csvs(output_dir, nodes_by_label, columns, json_lists)
-    edge_totals = _write_edge_csvs(output_dir, edges_by_type, columns, json_lists)
-    _generate_import_cypher(output_dir, node_totals, edge_totals, columns, json_lists)
-    _generate_import_sh(output_dir)
-
-    counts["nodes"] = node_totals
-    counts["edges"] = edge_totals
-    logger.info(
-        "Export complete: %s entity / %s person / %s relationship statements "
-        "(%s superseded skipped, %s malformed skipped)",
-        counts["entity_statements"], counts["person_statements"],
-        counts["relationship_statements"],
-        counts["skipped_superseded"], counts["skipped"],
-    )
-    return counts
+    return counts, nodes_by_label, edges_by_type
 
 
 # ---------------------------------------------------------------------------
