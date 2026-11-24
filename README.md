@@ -94,7 +94,9 @@ The script holds the data as Cypher literals in `UNWIND` batches (`--batch-size`
 
 `--dialect` picks the schema block at the top. `neo4j` (the default) writes uniqueness constraints, `memgraph` writes `CREATE INDEX ON :Label(key)`, and `none` writes nothing, for engines with their own index syntax. `--identifiers-property` adds the identifiers list to each node, as `to-csv` does.
 
-Measured on Neo4j 5.26 Community without APOC: the Azerbaijani Laundromat release (13,972 nodes, 18,621 relationships) loads and matches the driver route exactly. The Estonia release (348,794 statements; 287,989 nodes, 601,995 relationships) exports in about 75 s to a 504 MB script, 47 MB gzipped.
+Measured on Neo4j 5.26 Community without APOC: the Azerbaijani Laundromat release (13,972 nodes, 18,621 relationships) loads and matches the driver route exactly. The Estonia release (348,794 statements; 287,989 nodes, 526,303 relationships) exports in about 75 s to a 500 MB script, 47 MB gzipped.
+
+Measured on Relate 1.2.0 (the `relate-db` Python binding, run with `DO_NOT_TRACK=1`): the Neo4j-dialect script loads as written. The Laundromat release loads in 10 s to a 25 MB `.rl` file and matches the driver route's graph property for property. The Estonia release loads in about 6 minutes to a 173 MB `.rl` (66 MB gzipped), which then opens in about 13 s.
 
 **For a large file on Neo4j, use the driver load instead.** Every batch in the script is a new query text, so the server parses each one from scratch, and that makes the script much slower than `to-neo4j` on a big graph. It also needs memory: with 1,000-row batches the Estonia script ran a default 1 GB Neo4j heap out of memory, and `cypher-shell -f` ran out of its own client heap because it holds the whole file. The script is meant for engines that have no Neo4j driver route or no APOC, and for small and medium files.
 
